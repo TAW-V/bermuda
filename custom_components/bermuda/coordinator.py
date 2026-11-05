@@ -64,6 +64,7 @@ from .const import (
     CONF_ATTENUATION,
     CONF_DEVICES,
     CONF_DEVTRACK_TIMEOUT,
+    CONF_FINGERPRINT_MODE,
     CONF_MAX_RADIUS,
     CONF_MAX_VELOCITY,
     CONF_REF_POWER,
@@ -94,6 +95,7 @@ from .const import (
     SIGNAL_SCANNERS_CHANGED,
     UPDATE_INTERVAL,
 )
+from .fingerprint import FingerprintManager  # TAW-V fingerprint
 from .util import mac_explode_formats, mac_norm
 
 if TYPE_CHECKING:
@@ -263,6 +265,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     CONF_REF_POWER,
                     CONF_SMOOTHING_SAMPLES,
                     CONF_RSSI_OFFSETS,
+                    CONF_FINGERPRINT_MODE,  # TAW-V fingerprint
                 ):
                     self.options[key] = val
 
@@ -283,6 +286,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             ),
             SupportsResponse.ONLY,
         )
+
+        # TAW-V fingerprint: RSSI fingerprint store, services and matching
+        self.fingerprints = FingerprintManager(hass, self)
+        self.fingerprints.async_register_services()
+        entry.async_on_unload(self.fingerprints.async_shutdown)
+        entry.async_create_background_task(hass, self.fingerprints.async_load(), "Load fingerprints")
 
         # Register for newly discovered / changed BLE devices
         if self.config_entry is not None:
@@ -660,6 +669,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 device.calculate_data()
 
             self._refresh_areas_by_min_distance()
+            self.fingerprints.update(nowstamp)  # TAW-V fingerprint
 
             # We might need to freshen deliberately on first start if no new scanners
             # were discovered in the first scan update. This is likely if nothing has changed

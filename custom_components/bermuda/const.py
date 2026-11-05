@@ -194,6 +194,14 @@ DOCS[CONF_SMOOTHING_SAMPLES] = (
     " make for slower distance increases. 10 or 20 seems good."
 )
 
+# TAW-V fingerprint: RSSI fingerprinting mode (see fingerprint.py)
+FINGERPRINT_MODE_OFF = "off"
+FINGERPRINT_MODE_SHADOW = "shadow"
+FINGERPRINT_MODE_OVERRIDE = "override"
+FINGERPRINT_MODES = [FINGERPRINT_MODE_OFF, FINGERPRINT_MODE_SHADOW, FINGERPRINT_MODE_OVERRIDE]
+CONF_FINGERPRINT_MODE, DEFAULT_FINGERPRINT_MODE = "fingerprint_mode", FINGERPRINT_MODE_SHADOW
+DOCS[CONF_FINGERPRINT_MODE] = "RSSI fingerprinting: off, shadow (separate sensor) or override (drives Area)."
+
 # Defaults
 DEFAULT_NAME = DOMAIN
 

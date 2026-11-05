@@ -1,12 +1,63 @@
 ![Bermuda Logo](img/logo@2x.png)
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=agittins&repository=bermuda&category=Integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=TAW-V&repository=bermuda&category=Integration)
 
 # Bermuda BLE Trilateration
 
 - Track bluetooth devices by Area (Room) in [Home Assistant](https://home-assistant.io/), using [ESPHome](https://esphome.io/) [Bluetooth Proxies](https://esphome.io/components/bluetooth_proxy.html) and Shelly Gen2 or later devices.
 
 - (eventually) Triangulate device positions! Like, on a map. Maybe.
+
+> [!NOTE]
+> **This is the TAW-V fork** of [agittins/bermuda](https://github.com/agittins/bermuda) v0.8.7 with an opt-in
+> **RSSI fingerprinting** add-on (branch `fingerprinting`). Everything else is upstream Bermuda.
+
+## RSSI fingerprinting (this fork)
+
+Nearest-proxy area detection flaps when two proxies hear a device about equally well, and it can never pick a room
+without a proxy. Fingerprinting instead records what *all* proxies hear at a few spots per room, then matches the
+live signal pattern against those recordings.
+
+- **Record spots**: stand still at a spot with the tracked device and call `bermuda.record_fingerprint` with an
+  `area_id` (or a free-text `room` for places that are not HA areas). The label is auto-numbered (`Spot 1`, `Spot 2`,
+  ...) unless you give one. Default 120 s (30-600). Record 3-10 spots per room, including rooms without a proxy and
+  a spot or two outside. `spot_id` re-records an existing spot.
+- **Manage**: `bermuda.delete_fingerprint` (spot_id, or room + label), `bermuda.clear_fingerprints` (room),
+  `bermuda.list_fingerprints`, `bermuda.map_room` (move a free-text room to an HA area), `bermuda.cancel_fingerprint`.
+- **Validate**: `bermuda.evaluate_fingerprints` returns leave-one-spot-out accuracy on the recorded 10 s windows,
+  next to the nearest-proxy baseline, plus a confusion matrix and the worst spots.
+- **Matcher**: Gaussian naive-Bayes per spot with a detection term (heard / not heard), sigma clamped to 4-12 dB,
+  a per-spot device offset (median, ±8 dB) so a phone in a pocket or another transmitter still matches, and
+  per-scanner tempering. Offline proxies are ignored on both sides. Room = best spot; softmax posterior; EMA
+  smoothing (~6 s), hysteresis (+0.15 for 3 cycles, or ≥0.85) and 5 s minimum dwell. Below 0.5 confidence, with
+  fewer than 3 common proxies or no data, it falls back to Bermuda's own nearest-proxy area.
+- **Mode** (Bermuda options → Global options → Fingerprint mode):
+  - `shadow` (default): adds a *Fingerprint room* sensor per tracked device; Bermuda's Area/Floor are unchanged.
+  - `override`: Area and Floor follow the fingerprint room when it is confident and mapped to an HA area.
+  - `off`: no matching and no per-device fingerprint sensors.
+- **Entities**: `sensor.<device>_fingerprint_room` (state = room; attributes `area_id`, `confidence`, `reason`,
+  `source`, plus unrecorded details), `sensor.<device>_fingerprint_confidence` (disabled by default),
+  `sensor.bermuda_global_fingerprint_status` (idle / recording / done / failed / cancelled, with live progress) and
+  `sensor.bermuda_global_fingerprint_spots` (spot count; attribute `areas` lists every HA area with its spots, for
+  dashboards). Detail attributes are excluded from the recorder and state writes are rate-limited.
+- **Event**: `bermuda_fingerprint_recorded` when a recording ends (for a notification or TTS).
+- **Storage**: `.storage/bermuda.fingerprints` (raw RSSI, so changing RSSI offsets does not invalidate spots).
+- The maths is in `fingerprint_core.py` (pure Python, no HA imports). Tests:
+  `python3 -I -m unittest discover -s tests -p "test_fingerprint_core.py"`.
+
+Example dashboard button that records a new spot in the living room:
+
+```yaml
+type: button
+name: "+ new spot"
+icon: mdi:fingerprint
+tap_action:
+  action: perform-action
+  perform_action: bermuda.record_fingerprint
+  data:
+    area_id: living_room
+    duration: 60
+```
 
 
 [![GitHub Release][releases-shield]][releases]
@@ -49,7 +100,7 @@ Bermuda aims to let you track any bluetooth device, and have Home Assistant tell
 - Some bluetooth BLE devices you want to track. Phones, smart watches, beacon tiles, thermometers etc.
 
 - Bermuda! I strongly recommend installing Bermuda via HACS:
-  [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=agittins&repository=bermuda&category=Integration)
+  [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=TAW-V&repository=bermuda&category=Integration)
 
 ## Documentation and help
 
@@ -138,7 +189,7 @@ a fair amount of ESPresense's wheel.
 You can install Bermuda by opening HACS on your Home Assistant instance and searching for "Bermuda".
 Alternatively you can click the button below to be automatically redirected.
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=agittins&repository=bermuda&category=Integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=TAW-V&repository=bermuda&category=Integration)
 
 You should now be able to add the `Bermuda BLE Trilateration` integration. Once you have done that,
 you need to restart Home Assistant, then in `Settings`, `Devices & Services` choose `Add Integration`

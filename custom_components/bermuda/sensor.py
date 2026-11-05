@@ -23,6 +23,7 @@ from .const import (
     SIGNAL_SCANNERS_CHANGED,
 )
 from .entity import BermudaEntity, BermudaGlobalEntity
+from .fingerprint_sensor import fingerprint_device_entities, fingerprint_global_entities  # TAW-V fingerprint
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -78,6 +79,7 @@ async def async_setup_entry(
             entities.append(BermudaSensorRssi(coordinator, entry, address))
             entities.append(BermudaSensorAreaLastSeen(coordinator, entry, address))
             entities.append(BermudaSensorAreaSwitchReason(coordinator, entry, address))
+            entities.extend(fingerprint_device_entities(coordinator, entry, address))  # TAW-V fingerprint
 
             # _LOGGER.debug("Sensor received new_device signal for %s", address)
             # We set update before add to False because we are being
@@ -144,6 +146,7 @@ async def async_setup_entry(
             BermudaVisibleDeviceCount(coordinator, entry),
         )
     )
+    async_add_entities(fingerprint_global_entities(coordinator, entry))  # TAW-V fingerprint
 
 
 class BermudaSensor(BermudaEntity, SensorEntity):

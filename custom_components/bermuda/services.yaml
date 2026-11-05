@@ -13,3 +13,115 @@ dump_devices:
       required: false
       example: "False"
       default: false
+# TAW-V fingerprint
+record_fingerprint:
+  fields:
+    area_id:
+      required: false
+      example: "living_room"
+      selector:
+        area:
+    room:
+      required: false
+      example: "Attic stairs"
+      selector:
+        text:
+    label:
+      required: false
+      example: "Sofa"
+      selector:
+        text:
+    spot_id:
+      required: false
+      example: "0123456789ab"
+      selector:
+        text:
+    device:
+      required: false
+      example: "aabbccddeeff00112233445566778899_1_2"
+      selector:
+        text:
+    duration:
+      required: false
+      default: 120
+      selector:
+        number:
+          min: 30
+          max: 600
+          step: 10
+          unit_of_measurement: s
+    carry:
+      required: false
+      selector:
+        select:
+          options:
+            - hand
+            - pocket
+            - table
+            - other
+    replace:
+      required: false
+      default: false
+      selector:
+        boolean:
+cancel_fingerprint:
+delete_fingerprint:
+  fields:
+    spot_id:
+      required: false
+      selector:
+        text:
+    area_id:
+      required: false
+      selector:
+        area:
+    room:
+      required: false
+      selector:
+        text:
+    label:
+      required: false
+      selector:
+        text:
+clear_fingerprints:
+  fields:
+    area_id:
+      required: false
+      selector:
+        area:
+    room:
+      required: false
+      selector:
+        text:
+list_fingerprints:
+evaluate_fingerprints:
+  fields:
+    use_offset:
+      required: false
+      default: true
+      selector:
+        boolean:
+    temperature:
+      required: false
+      default: 0.5
+      selector:
+        number:
+          min: 0.05
+          max: 20
+          step: 0.05
+          mode: box
+    details:
+      required: false
+      default: false
+      selector:
+        boolean:
+map_room:
+  fields:
+    room:
+      required: true
+      selector:
+        text:
+    area_id:
+      required: true
+      selector:
+        area:

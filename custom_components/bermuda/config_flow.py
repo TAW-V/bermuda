@@ -27,6 +27,7 @@ from .const import (
     CONF_ATTENUATION,
     CONF_DEVICES,
     CONF_DEVTRACK_TIMEOUT,
+    CONF_FINGERPRINT_MODE,
     CONF_MAX_RADIUS,
     CONF_MAX_VELOCITY,
     CONF_REF_POWER,
@@ -38,6 +39,7 @@ from .const import (
     CONF_UPDATE_INTERVAL,
     DEFAULT_ATTENUATION,
     DEFAULT_DEVTRACK_TIMEOUT,
+    DEFAULT_FINGERPRINT_MODE,
     DEFAULT_MAX_RADIUS,
     DEFAULT_MAX_VELOCITY,
     DEFAULT_REF_POWER,
@@ -46,6 +48,7 @@ from .const import (
     DISTANCE_INFINITE,
     DOMAIN,
     DOMAIN_PRIVATE_BLE_DEVICE,
+    FINGERPRINT_MODES,
     NAME,
 )
 from .util import mac_redact, rssi_to_metres
@@ -229,6 +232,17 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 CONF_REF_POWER,
                 default=self.options.get(CONF_REF_POWER, DEFAULT_REF_POWER),
             ): vol.Coerce(float),
+            # TAW-V fingerprint
+            vol.Required(
+                CONF_FINGERPRINT_MODE,
+                default=self.options.get(CONF_FINGERPRINT_MODE, DEFAULT_FINGERPRINT_MODE),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=FINGERPRINT_MODES,
+                    mode=SelectSelectorMode.DROPDOWN,
+                    translation_key=CONF_FINGERPRINT_MODE,
+                )
+            ),
         }
 
         return self.async_show_form(step_id="globalopts", data_schema=vol.Schema(data_schema))

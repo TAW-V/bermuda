@@ -38,7 +38,8 @@
           "smoothing_samples": "Smoothing Samples - how many samples to use for smoothing distance readings.",
           "attenuation": "Attenuation - Environment attenuation factor for distance calculation/calibration.",
           "ref_power": "Reference Power - Default rssi at 1 metre distance, for distance calibration.",
-          "configured_devices": "Configured Devices - Select which Bluetooth devices or Beacons to track with Sensors."
+          "configured_devices": "Configured Devices - Select which Bluetooth devices or Beacons to track with Sensors.",
+          "fingerprint_mode": "Fingerprint mode"
         },
         "data_description": {
           "max_area_radius": "In the simple `AREA` feature, a device will be marked as being in the AREA of it's closest receiver, if inside this radius. If you set it small, devices will go to `unknown` between receivers, but if large devices will always appear as in their closest Area.",
@@ -47,7 +48,8 @@
           "update_interval": "Shortening distances will still trigger immediately, but increasing distances will be rate limited by this to reduce how much your database grows.",
           "smoothing_samples": "How many samples to average distance smoothing. Bigger numbers make for slower distance increases. Shortening distances are not affected. 10 or 20 seems good.",
           "attenuation": "After setting ref_power at 1 metre, adjust attenuation so that other distances read correctly - more or less.",
-          "ref_power": "Put your most-common beacon 1 metre (3.28') away from your most-common proxy / scanner. Adjust ref_power until the distance sensor shows a lowest (not average) distance of 1 metre."
+          "ref_power": "Put your most-common beacon 1 metre (3.28') away from your most-common proxy / scanner. Adjust ref_power until the distance sensor shows a lowest (not average) distance of 1 metre.",
+          "fingerprint_mode": "RSSI fingerprinting. `off`: no matching and no fingerprint sensors. `shadow`: a separate Fingerprint room sensor, Bermuda's Area is unchanged. `override`: Area and Floor follow the fingerprint room when it is confident and mapped to an HA area, otherwise Bermuda's nearest-proxy result."
         }
       },
       "selectdevices": {
@@ -112,12 +114,135 @@
           "description": "Set to TRUE to ensure MAC addresses are redacted in output for privacy."
         }
       }
+    },
+    "record_fingerprint": {
+      "name": "Record fingerprint",
+      "description": "Record an RSSI fingerprint (spot) for a room while the device stays at one position. Give an area_id (or a free-text room), or a spot_id to re-record an existing spot.",
+      "fields": {
+        "area_id": {
+          "name": "Area",
+          "description": "Home Assistant area the spot belongs to."
+        },
+        "room": {
+          "name": "Room",
+          "description": "Area name, or a free-text room label for places that are not HA areas (used when area_id is empty)."
+        },
+        "label": {
+          "name": "Label",
+          "description": "Name of the spot. Leave empty to auto-number (Spot 1, Spot 2, ...)."
+        },
+        "spot_id": {
+          "name": "Spot ID",
+          "description": "Re-record this existing spot (keeps its room and label)."
+        },
+        "device": {
+          "name": "Device",
+          "description": "Bermuda device address or name. Defaults to the only tracked device."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Recording time in seconds."
+        },
+        "carry": {
+          "name": "Carry",
+          "description": "How the device is carried during the recording."
+        },
+        "replace": {
+          "name": "Replace",
+          "description": "Replace an existing spot with the same label in the same room."
+        }
+      }
+    },
+    "cancel_fingerprint": {
+      "name": "Cancel fingerprint recording",
+      "description": "Stop the running recording without saving it."
+    },
+    "delete_fingerprint": {
+      "name": "Delete fingerprint",
+      "description": "Delete one spot, by spot_id or by room plus label.",
+      "fields": {
+        "spot_id": {
+          "name": "Spot ID",
+          "description": "ID of the spot to delete."
+        },
+        "area_id": {
+          "name": "Area",
+          "description": "Area of the spot."
+        },
+        "room": {
+          "name": "Room",
+          "description": "Room name or label of the spot."
+        },
+        "label": {
+          "name": "Label",
+          "description": "Label of the spot."
+        }
+      }
+    },
+    "clear_fingerprints": {
+      "name": "Clear fingerprints",
+      "description": "Delete all spots of one room.",
+      "fields": {
+        "area_id": {
+          "name": "Area",
+          "description": "Area to clear."
+        },
+        "room": {
+          "name": "Room",
+          "description": "Room name or label to clear."
+        }
+      }
+    },
+    "list_fingerprints": {
+      "name": "List fingerprints",
+      "description": "Return all rooms and spots (without raw windows)."
+    },
+    "evaluate_fingerprints": {
+      "name": "Evaluate fingerprints",
+      "description": "Leave-one-spot-out accuracy of the matcher on the recorded spots, compared with the nearest-proxy baseline.",
+      "fields": {
+        "use_offset": {
+          "name": "Use device offset",
+          "description": "Estimate a per-spot device/carry offset."
+        },
+        "temperature": {
+          "name": "Temperature",
+          "description": "Softmax temperature for the room posterior."
+        },
+        "details": {
+          "name": "Details",
+          "description": "Include per-spot results."
+        }
+      }
+    },
+    "map_room": {
+      "name": "Map room to area",
+      "description": "Move all spots of a free-text room to a Home Assistant area.",
+      "fields": {
+        "room": {
+          "name": "Room",
+          "description": "Existing room label."
+        },
+        "area_id": {
+          "name": "Area",
+          "description": "Target area."
+        }
+      }
     }
   },
   "issues": {
     "scanner_without_area": {
       "title": "Some Bluetooth Proxies don't have an AREA",
       "description": "Bermuda requires all bluetooth proxies to have a valid area assigned in order to work correctly. Assign an area by visiting each proxy's device page (via `Devices and Services`), and click the pencil icon in the top-right to assign an area. The following proxies are missing an area assignment:\n\n{scannerlist}"
+    }
+  },
+  "selector": {
+    "fingerprint_mode": {
+      "options": {
+        "off": "Off",
+        "shadow": "Shadow (separate sensor)",
+        "override": "Override (drives Area)"
+      }
     }
   }
 }
