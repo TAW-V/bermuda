@@ -9,6 +9,7 @@ from typing import Final
 
 from homeassistant.const import Platform
 
+from . import fingerprint_core as _fpc  # TAW-V fingerprint (pure Python, no HA imports)
 from .log_spam_less import BermudaLogSpamLess
 
 NAME = "Bermuda BLE Trilateration"
@@ -201,6 +202,17 @@ FINGERPRINT_MODE_OVERRIDE = "override"
 FINGERPRINT_MODES = [FINGERPRINT_MODE_OFF, FINGERPRINT_MODE_SHADOW, FINGERPRINT_MODE_OVERRIDE]
 CONF_FINGERPRINT_MODE, DEFAULT_FINGERPRINT_MODE = "fingerprint_mode", FINGERPRINT_MODE_SHADOW
 DOCS[CONF_FINGERPRINT_MODE] = "RSSI fingerprinting: off, shadow (separate sensor) or override (drives Area)."
+# Matcher knobs; the defaults are the values tuned on real recordings (see fingerprint_core.py).
+CONF_FP_METHOD, DEFAULT_FP_METHOD = "fingerprint_method", _fpc.DEFAULT_METHOD
+FP_METHODS = _fpc.METHODS
+DOCS[CONF_FP_METHOD] = "Fingerprint matcher: knn (nearest spot levels, default) or bayes (naive Bayes with presence term)."
+CONF_FP_OFFSET_MAX, DEFAULT_FP_OFFSET_MAX = "fingerprint_offset_max", _fpc.OFFSET_MAX_DB
+DOCS[CONF_FP_OFFSET_MAX] = "Cap (dB) of the estimated per-device offset; 0 disables offset estimation."
+CONF_FP_OUTLIER_DB, DEFAULT_FP_OUTLIER_DB = "fingerprint_outlier_db", _fpc.OUTLIER_DB
+DOCS[CONF_FP_OUTLIER_DB] = "Fall back to nearest-proxy when the nearest spot is farther than this (RMS dB); 0 disables."
+CONF_FP_MIN_CONFIDENCE, DEFAULT_FP_MIN_CONFIDENCE = "fingerprint_min_confidence", 0.5
+DOCS[CONF_FP_MIN_CONFIDENCE] = "Fall back to nearest-proxy when the smoothed room probability is below this."
+FINGERPRINT_OPTION_KEYS = (CONF_FP_METHOD, CONF_FP_OFFSET_MAX, CONF_FP_OUTLIER_DB, CONF_FP_MIN_CONFIDENCE)
 
 # Defaults
 DEFAULT_NAME = DOMAIN

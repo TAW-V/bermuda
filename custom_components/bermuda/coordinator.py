@@ -80,6 +80,7 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     DOMAIN_PRIVATE_BLE_DEVICE,
+    FINGERPRINT_OPTION_KEYS,
     METADEVICE_IBEACON_DEVICE,
     METADEVICE_TYPE_IBEACON_SOURCE,
     METADEVICE_TYPE_PRIVATE_BLE_SOURCE,
@@ -266,6 +267,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     CONF_SMOOTHING_SAMPLES,
                     CONF_RSSI_OFFSETS,
                     CONF_FINGERPRINT_MODE,  # TAW-V fingerprint
+                    *FINGERPRINT_OPTION_KEYS,  # TAW-V fingerprint
                 ):
                     self.options[key] = val
 

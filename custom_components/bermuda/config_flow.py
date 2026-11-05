@@ -28,6 +28,10 @@ from .const import (
     CONF_DEVICES,
     CONF_DEVTRACK_TIMEOUT,
     CONF_FINGERPRINT_MODE,
+    CONF_FP_METHOD,
+    CONF_FP_MIN_CONFIDENCE,
+    CONF_FP_OFFSET_MAX,
+    CONF_FP_OUTLIER_DB,
     CONF_MAX_RADIUS,
     CONF_MAX_VELOCITY,
     CONF_REF_POWER,
@@ -40,6 +44,10 @@ from .const import (
     DEFAULT_ATTENUATION,
     DEFAULT_DEVTRACK_TIMEOUT,
     DEFAULT_FINGERPRINT_MODE,
+    DEFAULT_FP_METHOD,
+    DEFAULT_FP_MIN_CONFIDENCE,
+    DEFAULT_FP_OFFSET_MAX,
+    DEFAULT_FP_OUTLIER_DB,
     DEFAULT_MAX_RADIUS,
     DEFAULT_MAX_VELOCITY,
     DEFAULT_REF_POWER,
@@ -49,6 +57,7 @@ from .const import (
     DOMAIN,
     DOMAIN_PRIVATE_BLE_DEVICE,
     FINGERPRINT_MODES,
+    FP_METHODS,
     NAME,
 )
 from .util import mac_redact, rssi_to_metres
@@ -243,6 +252,28 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                     translation_key=CONF_FINGERPRINT_MODE,
                 )
             ),
+            vol.Required(
+                CONF_FP_METHOD,
+                default=self.options.get(CONF_FP_METHOD, DEFAULT_FP_METHOD),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=FP_METHODS,
+                    mode=SelectSelectorMode.DROPDOWN,
+                    translation_key=CONF_FP_METHOD,
+                )
+            ),
+            vol.Required(
+                CONF_FP_OFFSET_MAX,
+                default=self.options.get(CONF_FP_OFFSET_MAX, DEFAULT_FP_OFFSET_MAX),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=10)),
+            vol.Required(
+                CONF_FP_OUTLIER_DB,
+                default=self.options.get(CONF_FP_OUTLIER_DB, DEFAULT_FP_OUTLIER_DB),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=40)),
+            vol.Required(
+                CONF_FP_MIN_CONFIDENCE,
+                default=self.options.get(CONF_FP_MIN_CONFIDENCE, DEFAULT_FP_MIN_CONFIDENCE),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=0.99)),
         }
 
         return self.async_show_form(step_id="globalopts", data_schema=vol.Schema(data_schema))

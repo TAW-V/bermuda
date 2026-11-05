@@ -12,9 +12,12 @@ Concepts
 - A *room* is a key (an HA area_id, or a slug for a label-only room). Each spot
   belongs to one room.
 - The live vector is, per scanner, the median raw RSSI over the last ~12 s.
-- ``Matcher`` scores every spot with a tempered Gaussian naive-Bayes model with a
-  detection term and a per-spot device offset, takes the best spot per room,
-  and turns room scores into a posterior via a softmax.
+- ``Matcher`` scores every spot over the same set of scanners (all known, online
+  scanners), aggregates the spots of a room (count-normalised mixture by default),
+  and turns room scores into a posterior via a softmax. Default method ``knn``:
+  RMS dB difference to the spot means, a missing scanner counting as -100 dBm, no
+  device offset. ``bayes`` (fp1-fp3) is still available. A live vector far from
+  every spot is flagged as an outlier so the caller can fall back.
 - ``RoomSmoother`` applies an EMA, hysteresis and minimum dwell time, and
   decides when to fall back to Bermuda's own nearest-proxy area.
 """
@@ -31,17 +34,26 @@ from typing import Any
 RSSI_INVALID = -127  # Readings at or below this are ignored
 WINDOW_S = 10.0  # Recording window length for "seen" and window medians
 LIVE_WINDOW_S = 12.0  # Live vector window
-SIGMA_MIN = 4.0
+SIGMA_MIN = 4.0  # bayes: per-scanner std floor
 SIGMA_MAX = 12.0
 SEEN_MIN = 0.05
 SEEN_MAX = 0.95
-UNKNOWN_MEAN = -100.0  # Model for a scanner never heard at a spot
+UNKNOWN_MEAN = -100.0  # bayes: model for a scanner never heard at a spot
 UNKNOWN_SIGMA = 6.0
-OFFSET_MAX_DB = 8.0
-OFFSET_PRIOR_DB = 6.0  # Gentle prior keeping the device offset near 0
+MISSING_RSSI = -100.0  # knn: a scanner not heard counts as this (and readings are floored here)
+DISTANCE_FLOOR = -100.0  # the same for the outlier distance (fixed, so outlier_db keeps its meaning)
+DEFAULT_METHOD = "knn"
+OFFSET_MAX_DB = 0.0  # cap of the per-spot device offset; 0 disables it (tuned: it erases the level
+# difference between adjacent rooms)
+OFFSET_PRIOR_DB = 6.0  # bayes: gentle prior keeping the device offset near 0
 OFFSET_MIN_SEEN = 0.5
+OFFSET_MIN_SCANNERS = 4  # only estimate an offset when this many strong common scanners agree
+PRESENCE_WEIGHT = 1.0  # bayes: weight of the seen / not-seen log terms
+KNN_SCALE_DB = 4.0  # knn: score = -0.5 (rms_db / scale)^2
+OUTLIER_DB = 10.0  # nearest spot farther than this (RMS dB) -> outlier, fall back; 0 disables
 MIN_COMMON = 3  # Minimum common heard scanners for a spot to be scored
-TEMPERATURE = 0.5  # softmax temperature on per-scanner scores; 0.5 calibrated on synthetic data
+TEMPERATURE = 0.3  # knn softmax temperature (lowest leave-one-out log-loss)
+TEMPERATURE_BAYES = 0.5  # bayes softmax temperature
 
 _LOG_SQRT_2PI = 0.5 * math.log(2 * math.pi)
 
@@ -178,6 +190,15 @@ def spot_windows(spot: dict[str, Any]) -> list[dict[str, float]]:
 # ---------------------------------------------------------------------------
 # Matching
 # ---------------------------------------------------------------------------
+METHOD_KNN = "knn"  # nearest spot means, RMS dB distance (default)
+METHOD_BAYES = "bayes"  # Gaussian naive Bayes with a detection term (fp1-fp3)
+METHODS = [METHOD_KNN, METHOD_BAYES]
+ROOM_AGG_MAX = "max"  # room score = best of its top-k spots
+ROOM_AGG_MEAN = "mean"  # room score = mean of its top-k spots
+ROOM_AGG_MIX = "mix"  # room score = log-mean-exp of its top-k spots (mixture)
+ROOM_AGGS = [ROOM_AGG_MAX, ROOM_AGG_MEAN, ROOM_AGG_MIX]
+
+
 @dataclass(slots=True)
 class _ScannerModel:
     mean: float
@@ -187,31 +208,37 @@ class _ScannerModel:
     seen: float
 
     @classmethod
-    def from_stats(cls, stats: dict[str, float]) -> _ScannerModel:
+    def from_stats(cls, stats: dict[str, float], sigma_min: float = SIGMA_MIN) -> _ScannerModel:
         seen = clamp(float(stats.get("seen", SEEN_MIN)), SEEN_MIN, SEEN_MAX)
-        sigma = clamp(float(stats.get("std", SIGMA_MIN)), SIGMA_MIN, SIGMA_MAX)
+        sigma = clamp(float(stats.get("std", sigma_min)), sigma_min, max(sigma_min, SIGMA_MAX))
         return cls(float(stats["mean"]), sigma, math.log(seen), math.log(1 - seen), seen)
 
 
-_UNKNOWN_MODEL = _ScannerModel(UNKNOWN_MEAN, UNKNOWN_SIGMA, math.log(SEEN_MIN), math.log(1 - SEEN_MIN), SEEN_MIN)
+def _unknown_model(sigma_min: float) -> _ScannerModel:
+    return _ScannerModel(
+        UNKNOWN_MEAN, max(UNKNOWN_SIGMA, sigma_min), math.log(SEEN_MIN), math.log(1 - SEEN_MIN), SEEN_MIN
+    )
 
 
 @dataclass(slots=True)
 class SpotScore:
     spot_id: str
     room: str
-    score: float  # tempered log-likelihood (per scanner)
-    used: int  # scanners in the likelihood
+    score: float  # per-scanner score (tempered log-likelihood, or -0.5 (d / scale)^2 for knn)
+    used: int  # scanners in the score (the same for every spot)
     common: int  # heard live and known at the spot
     offset: float  # estimated device offset in dB
+    distance: float = 0.0  # dB: sqrt(sum of squared differences / heard scanners), missing = floor
 
 
 @dataclass(slots=True)
 class MatchResult:
     posterior: dict[str, float]  # room -> P
-    best: SpotScore
+    best: SpotScore  # best spot of the best room
     second: SpotScore | None  # best spot of the runner-up room
     room_best: dict[str, SpotScore] = field(default_factory=dict)
+    distance: float = 0.0  # distance to the nearest spot of any room (dB)
+    outlier: bool = False  # nearest spot farther than outlier_db: position not covered by any spot
 
 
 @dataclass(slots=True)
@@ -222,23 +249,68 @@ class _SpotModel:
 
 
 class Matcher:
-    """Scores a live vector against stored spots."""
+    """
+    Scores a live vector against stored spots.
+
+    Methods:
+    - ``knn``: per spot the RMS difference in dB between the live vector and the spot means over the
+      union of scanners, a scanner missing on one side counting as ``missing_rssi`` (and values are
+      floored there). Score = -0.5 (d / knn_scale)^2. Absolute levels matter, presence only through
+      the floor, and every spot weighs the same however many scanners heard it.
+    - ``bayes``: the fp1-fp3 Gaussian naive Bayes with a detection term (``presence_weight`` scales
+      the seen/unseen log terms) and a per-scanner std floor ``sigma_min``.
+
+    Both can subtract a per-spot device offset (median live-minus-spot difference over the strong
+    common scanners), capped at ``offset_max`` dB and only estimated when at least
+    ``offset_min_scanners`` scanners agree. ``offset_max = 0`` disables it.
+
+    A room's score aggregates its best ``room_k`` spots (0 = all) with ``room_agg``; the room
+    posterior is a softmax over room scores with ``temperature``. If the nearest spot is farther
+    than ``outlier_db`` the result is flagged as an outlier (``outlier_db = 0`` disables this).
+    """
 
     def __init__(
         self,
         spots: list[dict[str, Any]],
         *,
+        method: str = DEFAULT_METHOD,
         use_offset: bool = True,
-        temperature: float = TEMPERATURE,
+        offset_max: float = OFFSET_MAX_DB,
+        offset_min_scanners: int = OFFSET_MIN_SCANNERS,
+        sigma_min: float = SIGMA_MIN,
+        presence_weight: float = PRESENCE_WEIGHT,
+        knn_scale: float = KNN_SCALE_DB,
+        room_agg: str = ROOM_AGG_MIX,
+        room_k: int = 0,
+        temperature: float | None = None,
         min_common: int = MIN_COMMON,
+        outlier_db: float = OUTLIER_DB,
+        missing_rssi: float = MISSING_RSSI,
     ) -> None:
-        self.use_offset = use_offset
-        self.temperature = temperature
+        if method not in METHODS:
+            raise ValueError(f"unknown method {method!r}")
+        if room_agg not in ROOM_AGGS:
+            raise ValueError(f"unknown room_agg {room_agg!r}")
+        self.method = method
+        self.offset_max = float(offset_max) if use_offset else 0.0
+        self.use_offset = self.offset_max > 0
+        self.offset_min_scanners = max(1, int(offset_min_scanners))
+        self.sigma_min = float(sigma_min)
+        self.presence_weight = float(presence_weight)
+        self.knn_scale = max(float(knn_scale), 0.1)
+        self.room_agg = room_agg
+        self.room_k = max(0, int(room_k))
+        if temperature is None:
+            temperature = TEMPERATURE if method == METHOD_KNN else TEMPERATURE_BAYES
+        self.temperature = max(float(temperature), 1e-6)
         self.min_common = min_common
+        self.outlier_db = max(0.0, float(outlier_db))
+        self.floor = float(missing_rssi)
+        self._unknown = _unknown_model(self.sigma_min)
         self.spots: list[_SpotModel] = []
         self.known_scanners: set[str] = set()
         for spot in spots:
-            models = {s: _ScannerModel.from_stats(st) for s, st in spot.get("scanners", {}).items()}
+            models = {s: _ScannerModel.from_stats(st, self.sigma_min) for s, st in spot.get("scanners", {}).items()}
             if not models or not spot.get("room"):
                 continue
             self.spots.append(_SpotModel(str(spot.get("id")), str(spot["room"]), models))
@@ -251,64 +323,119 @@ class Matcher:
     def rooms(self) -> set[str]:
         return {s.room for s in self.spots}
 
-    def score_spot(self, spot: _SpotModel, heard: dict[str, float], active: set[str] | None) -> SpotScore | None:
+    def _offset(self, spot: _SpotModel, heard: dict[str, float], common: list[str]) -> float:
+        if not self.use_offset:
+            return 0.0
+        diffs = [heard[s] - spot.scanners[s].mean for s in common if spot.scanners[s].seen > OFFSET_MIN_SEEN]
+        if len(diffs) < self.offset_min_scanners:
+            return 0.0
+        return clamp(median(diffs), -self.offset_max, self.offset_max)
+
+    def score_spot(
+        self,
+        spot: _SpotModel,
+        heard: dict[str, float],
+        scanners: set[str],
+        extra: tuple[float, int] = (0.0, 0),
+    ) -> SpotScore | None:
+        """
+        Score one spot over `scanners`, the SAME set for every spot (all known, active
+        scanners). Scoring each spot over its own scanners would dilute the misfit of
+        spots that list many (weak) scanners and make them win (the fp3 bias).
+
+        `heard` holds only known scanners; `extra` is (sum of squares, count) of heard
+        scanners no spot knows, which only count towards the outlier distance.
+        """
         common = [s for s in heard if s in spot.scanners]
         if len(common) < self.min_common:
             return None
-
-        offset = 0.0
-        if self.use_offset:
-            diffs = [heard[s] - spot.scanners[s].mean for s in common if spot.scanners[s].seen > OFFSET_MIN_SEEN]
-            if diffs:
-                offset = clamp(median(diffs), -OFFSET_MAX_DB, OFFSET_MAX_DB)
-
-        scanners = set(spot.scanners) | set(heard)
-        if active is not None:
-            scanners &= active
+        offset = self._offset(spot, heard, common)
+        floor = self.floor
+        sq = 0.0  # knn score, with the configurable floor
+        dsq = 0.0  # outlier distance, always with DISTANCE_FLOOR
         loglik = 0.0
-        used = 0
+        bayes = self.method == METHOD_BAYES
+        w = self.presence_weight
         for s in scanners:
-            model = spot.scanners.get(s, _UNKNOWN_MODEL)
+            model = spot.scanners.get(s)
             x = heard.get(s)
-            if x is None:
-                loglik += model.log_unseen
-            else:
-                z = (x - offset - model.mean) / model.sigma
-                loglik += model.log_seen - 0.5 * z * z - math.log(model.sigma) - _LOG_SQRT_2PI
-            used += 1
-        if used == 0:
-            return None
-        if self.use_offset:
-            loglik -= 0.5 * (offset / OFFSET_PRIOR_DB) ** 2
-        return SpotScore(spot.spot_id, spot.room, loglik / used, used, len(common), offset)
+            xo = None if x is None else x - offset
+            m = None if model is None else model.mean
+            a = floor if xo is None else max(xo, floor)
+            b = floor if m is None else max(m, floor)
+            sq += (a - b) ** 2
+            a = DISTANCE_FLOOR if xo is None else max(xo, DISTANCE_FLOOR)
+            b = DISTANCE_FLOOR if m is None else max(m, DISTANCE_FLOOR)
+            dsq += (a - b) ** 2
+            if bayes:
+                if model is None:
+                    model = self._unknown
+                if x is None:
+                    loglik += w * model.log_unseen
+                else:
+                    z = (x - offset - model.mean) / model.sigma
+                    loglik += w * model.log_seen - 0.5 * z * z - math.log(model.sigma) - _LOG_SQRT_2PI
+        # Normalise by the number of heard scanners: the same for every spot, so it only sets the scale.
+        n_heard = max(1, len(heard) + extra[1])
+        distance = math.sqrt((dsq + extra[0]) / n_heard)
+        if bayes:
+            if self.use_offset:
+                loglik -= 0.5 * (offset / OFFSET_PRIOR_DB) ** 2
+            score = loglik / max(1, len(heard))
+        else:
+            score = -0.5 * (sq / max(1, len(heard))) / self.knn_scale**2
+        return SpotScore(spot.spot_id, spot.room, score, len(scanners), len(common), offset, distance)
+
+    def _room_score(self, scores: list[float]) -> float:
+        scores = sorted(scores, reverse=True)
+        if self.room_k:
+            scores = scores[: self.room_k]
+        if self.room_agg == ROOM_AGG_MAX:
+            return scores[0]
+        if self.room_agg == ROOM_AGG_MEAN:
+            return sum(scores) / len(scores)
+        t = self.temperature
+        top = scores[0]
+        return top + t * math.log(sum(math.exp((s - top) / t) for s in scores) / len(scores))
 
     def match(self, live: dict[str, float], active: set[str] | None = None) -> MatchResult | None:
         """
         Match a live vector.
 
         `active` is the set of scanners currently online; scanners outside it are
-        ignored on both sides. Scanners that no spot knows are always ignored.
+        ignored on both sides. Scanners that no spot knows do not affect the room
+        scores, but a strong one makes the outlier distance large.
         """
-        heard = {s: x for s, x in live.items() if s in self.known_scanners and (active is None or s in active)}
-        if active is not None:
-            active = active & self.known_scanners
-        room_best: dict[str, SpotScore] = {}
+        live = {s: x for s, x in live.items() if active is None or s in active}
+        heard = {s: x for s, x in live.items() if s in self.known_scanners}
+        unknown = [max(x, DISTANCE_FLOOR) - DISTANCE_FLOOR for s, x in live.items() if s not in self.known_scanners]
+        extra = (sum(v * v for v in unknown), len(unknown))
+        scanners = self.known_scanners if active is None else active & self.known_scanners
+        per_room: dict[str, list[SpotScore]] = {}
         for spot in self.spots:
-            sc = self.score_spot(spot, heard, active)
-            if sc is None:
-                continue
-            cur = room_best.get(sc.room)
-            if cur is None or sc.score > cur.score:
-                room_best[sc.room] = sc
-        if not room_best:
+            sc = self.score_spot(spot, heard, scanners, extra)
+            if sc is not None:
+                per_room.setdefault(sc.room, []).append(sc)
+        if not per_room:
             return None
-        temp = max(self.temperature, 1e-6)
-        top = max(sc.score for sc in room_best.values())
-        exps = {room: math.exp((sc.score - top) / temp) for room, sc in room_best.items()}
+        room_score = {room: self._room_score([sc.score for sc in scs]) for room, scs in per_room.items()}
+        room_best = {room: max(scs, key=lambda sc: sc.score) for room, scs in per_room.items()}
+        temp = self.temperature
+        top = max(room_score.values())
+        exps = {room: math.exp((score - top) / temp) for room, score in room_score.items()}
         total = sum(exps.values())
         posterior = {room: v / total for room, v in exps.items()}
-        ranked = sorted(room_best.values(), key=lambda sc: sc.score, reverse=True)
-        return MatchResult(posterior, ranked[0], ranked[1] if len(ranked) > 1 else None, room_best)
+        ranked = sorted(room_score, key=room_score.get, reverse=True)
+        distance = min(sc.distance for scs in per_room.values() for sc in scs)
+        outlier = self.outlier_db > 0 and distance > self.outlier_db
+        return MatchResult(
+            posterior,
+            room_best[ranked[0]],
+            room_best[ranked[1]] if len(ranked) > 1 else None,
+            room_best,
+            distance,
+            outlier,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +445,7 @@ REASON_MATCH = "match"
 REASON_LOW_CONF = "fallback-low-confidence"
 REASON_NO_DATA = "fallback-no-data"
 REASON_NO_FP = "fallback-no-fingerprints"
+REASON_OUTLIER = "fallback-outlier"  # far from every recorded spot (e.g. a room without spots)
 
 
 @dataclass(slots=True)
@@ -375,11 +503,17 @@ class RoomSmoother:
         challenger_p = self.ema.get(challenger, 0.0) if challenger else 0.0
         return SmoothedResult(room, reason, conf, self.incumbent, challenger, challenger_p, holding)
 
-    def update(self, posterior: dict[str, float] | None, nowstamp: float) -> SmoothedResult:
+    def update(
+        self, posterior: dict[str, float] | None, nowstamp: float, reason: str = REASON_NO_DATA
+    ) -> SmoothedResult:
+        """
+        Feed one cycle. `posterior` None means no usable match this cycle (`reason` says why:
+        no data, or an outlier); the state is kept for `reset_after` seconds.
+        """
         if posterior is None:
             if self.last_data is None or nowstamp - self.last_data > self.reset_after:
                 self.reset()
-            return self._result(REASON_NO_DATA)
+            return self._result(reason)
 
         dt = 0.0 if self.last_update is None else max(0.0, nowstamp - self.last_update)
         self.last_update = nowstamp
@@ -449,6 +583,23 @@ def nearest_proxy_room(
     return best
 
 
+def _balanced(confusion: dict[str, dict[str, int]]) -> tuple[float | None, dict[str, float]]:
+    recall = {}
+    for room, row in confusion.items():
+        n = sum(row.values())
+        if n:
+            recall[room] = round(row.get(room, 0) / n, 3)
+    return (round(sum(recall.values()) / len(recall), 3) if recall else None), recall
+
+
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    vals = sorted(values)
+    idx = min(len(vals) - 1, max(0, math.ceil(q * len(vals)) - 1))
+    return vals[idx]
+
+
 def evaluate(
     spots: list[dict[str, Any]],
     *,
@@ -461,50 +612,84 @@ def evaluate(
     Leave-one-spot-out evaluation on the stored window medians.
 
     Each spot's windows are classified by a Matcher trained on all other spots.
-    Returns overall and per-spot accuracy, a confusion matrix (true -> predicted
-    -> count) and, if `scanner_room` is given, the nearest-proxy baseline.
+    Returns overall, per-room (balanced) and per-spot accuracy, a confusion matrix
+    (true -> predicted -> count), the log-loss and mean confidence of the room
+    posterior, the held-out nearest-spot distances (to calibrate the outlier
+    threshold) and, if `scanner_room` is given, the nearest-proxy baseline and the
+    effective accuracy with fallback to it (outlier or low confidence).
     """
-    total = correct = base_correct = confident = confident_ok = 0
+    total = correct = confident = confident_ok = outliers = eff_correct = 0
+    log_loss = conf_sum = 0.0
     per_spot = []
     confusion: dict[str, dict[str, int]] = {}
+    base_confusion: dict[str, dict[str, int]] = {}
+    eff_confusion: dict[str, dict[str, int]] = {}
+    distances: list[float] = []
+
+    def bump(table: dict[str, dict[str, int]], true: str, pred: str | None) -> None:
+        row = table.setdefault(true, {})
+        key = pred or "none"
+        row[key] = row.get(key, 0) + 1
+
     for i, spot in enumerate(spots):
         others = spots[:i] + spots[i + 1 :]
         matcher = Matcher(others, **matcher_kwargs)
+        room = spot["room"]
         n = ok = base_ok = 0
         for vec in spot_windows(spot):
             res = matcher.match(vec)
             pred = max(res.posterior, key=res.posterior.get) if res else None
             n += 1
-            ok += pred == spot["room"]
-            if res is not None and res.posterior[pred] >= min_confidence:
+            ok += pred == room
+            bump(confusion, room, pred)
+            p_true = res.posterior.get(room, 0.0) if res else 0.0
+            log_loss -= math.log(max(p_true, 0.01))
+            accepted = res is not None and not res.outlier and res.posterior[pred] >= min_confidence
+            if res is not None:
+                conf_sum += res.posterior[pred]
+                distances.append(res.distance)
+                outliers += res.outlier
+            if accepted:
                 confident += 1
-                confident_ok += pred == spot["room"]
-            row = confusion.setdefault(spot["room"], {})
-            key = pred or "none"
-            row[key] = row.get(key, 0) + 1
+                confident_ok += pred == room
             if scanner_room is not None:
-                base_ok += nearest_proxy_room(vec, scanner_room, rssi_offsets) == spot["room"]
+                base = nearest_proxy_room(vec, scanner_room, rssi_offsets)
+                base_ok += base == room
+                bump(base_confusion, room, base)
+                eff = pred if accepted else base
+                eff_correct += eff == room
+                bump(eff_confusion, room, eff)
         total += n
         correct += ok
-        base_correct += base_ok
-        entry = {"id": spot.get("id"), "room": spot["room"], "label": spot.get("label"), "windows": n}
+        entry = {"id": spot.get("id"), "room": room, "label": spot.get("label"), "windows": n}
         entry["accuracy"] = round(ok / n, 3) if n else None
         if scanner_room is not None:
             entry["baseline_accuracy"] = round(base_ok / n, 3) if n else None
         per_spot.append(entry)
+
+    balanced, recall = _balanced(confusion)
     out: dict[str, Any] = {
         "spots": len(spots),
         "windows": total,
         "accuracy": round(correct / total, 3) if total else None,
-        # Unsmoothed: share of windows that would pass the confidence threshold, and their accuracy.
+        "balanced_accuracy": balanced,
+        "room_recall": recall,
+        "log_loss": round(log_loss / total, 3) if total else None,
+        "mean_confidence": round(conf_sum / total, 3) if total else None,
+        # Unsmoothed: share of windows that would be accepted (not an outlier, P >= min_confidence) and their accuracy.
         "confident_share": round(confident / total, 3) if total else None,
         "confident_accuracy": round(confident_ok / confident, 3) if confident else None,
+        "outlier_share": round(outliers / total, 3) if total else None,
+        "distance_p95": round(_percentile(distances, 0.95), 1) if distances else None,
+        "distance_max": round(max(distances), 1) if distances else None,
         "confusion": confusion,
-        "worst_spots": sorted(
-            (s for s in per_spot if s["accuracy"] is not None), key=lambda s: s["accuracy"]
-        )[:5],
+        "worst_spots": sorted((s for s in per_spot if s["accuracy"] is not None), key=lambda s: s["accuracy"])[:5],
         "per_spot": per_spot,
     }
     if scanner_room is not None:
+        base_correct = sum(row.get(room, 0) for room, row in base_confusion.items())
         out["baseline_accuracy"] = round(base_correct / total, 3) if total else None
+        out["baseline_balanced_accuracy"] = _balanced(base_confusion)[0]
+        out["effective_accuracy"] = round(eff_correct / total, 3) if total else None
+        out["effective_balanced_accuracy"] = _balanced(eff_confusion)[0]
     return out

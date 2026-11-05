@@ -27,6 +27,12 @@ MOCK_OPTIONS_GLOBALS = {
     custom_components.bermuda.const.CONF_SMOOTHING_SAMPLES: 20,
     custom_components.bermuda.const.CONF_ATTENUATION: 3.0,
     custom_components.bermuda.const.CONF_REF_POWER: -55.0,
+    # TAW-V fingerprint options (all present in the global options form)
+    custom_components.bermuda.const.CONF_FINGERPRINT_MODE: "shadow",
+    custom_components.bermuda.const.CONF_FP_METHOD: "knn",
+    custom_components.bermuda.const.CONF_FP_OFFSET_MAX: 0.0,
+    custom_components.bermuda.const.CONF_FP_OUTLIER_DB: 10.0,
+    custom_components.bermuda.const.CONF_FP_MIN_CONFIDENCE: 0.5,
 }
 
 MOCK_OPTIONS_DEVICES = {

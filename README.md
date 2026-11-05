@@ -25,12 +25,20 @@ live signal pattern against those recordings.
 - **Manage**: `bermuda.delete_fingerprint` (spot_id, or room + label), `bermuda.clear_fingerprints` (room),
   `bermuda.list_fingerprints`, `bermuda.map_room` (move a free-text room to an HA area), `bermuda.cancel_fingerprint`.
 - **Validate**: `bermuda.evaluate_fingerprints` returns leave-one-spot-out accuracy on the recorded 10 s windows,
-  next to the nearest-proxy baseline, plus a confusion matrix and the worst spots.
-- **Matcher**: Gaussian naive-Bayes per spot with a detection term (heard / not heard), sigma clamped to 4-12 dB,
-  a per-spot device offset (median, ±8 dB) so a phone in a pocket or another transmitter still matches, and
-  per-scanner tempering. Offline proxies are ignored on both sides. Room = best spot; softmax posterior; EMA
-  smoothing (~6 s), hysteresis (+0.15 for 3 cycles, or ≥0.85) and 5 s minimum dwell. Below 0.5 confidence, with
-  fewer than 3 common proxies or no data, it falls back to Bermuda's own nearest-proxy area.
+  balanced accuracy (mean per-room recall), log-loss and confidence, next to the nearest-proxy baseline, plus a
+  confusion matrix and the worst spots. Offline: `python3 -I scripts/fingerprint_eval.py --storage /config/.storage`
+  compares matcher variants, smoothing and live-like perturbations (fewer/more scanners, level shifts).
+- **Matcher** (default `knn`): per spot the RMS difference in dB between the live vector and the spot means, over
+  the same set of scanners for every spot (a scanner not heard counts as -100 dBm), so a spot that lists many weak
+  scanners gains nothing from that. A room's score is a count-normalised mixture over its spots (a room with more
+  spots does not win by count); softmax posterior (T 0.3). No device offset by default: between adjacent rooms the
+  absolute level is often the only difference. If even the nearest spot is more than 10 dB away (a room without
+  spots) the result is an outlier and falls back to nearest-proxy. Smoothing: EMA (~6 s), hysteresis (+0.15 for 3
+  cycles, or >=0.85) and 5 s minimum dwell; below 0.5 confidence, with fewer than 3 common proxies, as an outlier or
+  without data it falls back to Bermuda's own nearest-proxy area. The fp1-fp3 naive Bayes (`bayes`) is still
+  available.
+- **Options** (Bermuda options -> Global options): fingerprint matcher (`knn` / `bayes`), device offset cap
+  (dB, 0 = off, default 0), outlier distance (dB, 0 = off, default 10), minimum confidence (default 0.5).
 - **Mode** (Bermuda options → Global options → Fingerprint mode):
   - `shadow` (default): adds a *Fingerprint room* sensor per tracked device; Bermuda's Area/Floor are unchanged.
   - `override`: Area and Floor follow the fingerprint room when it is confident and mapped to an HA area.

@@ -151,8 +151,8 @@ class BermudaSensorFingerprintRoom(_FingerprintDeviceSensor):
     _attr_name = "Fingerprint room"
     _attr_icon = "mdi:fingerprint"
     _unrecorded_attributes = frozenset(
-        {"best", "second", "margin", "offset_db", "common_scanners", "heard_scanners", "nearest_area", "holding",
-         "smoothed_room", "recording"}  # fmt: skip
+        {"best", "second", "margin", "offset_db", "distance_db", "outlier", "common_scanners", "heard_scanners",
+         "nearest_area", "holding", "smoothed_room", "recording"}  # fmt: skip
     )
 
     @property

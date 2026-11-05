@@ -172,16 +172,27 @@ class TestMatcher(unittest.TestCase):
         rng = random.Random(5)
         live = synth_live(rng, "bedroom", noise=0.5)
         shifted = {s: v - 6 for s, v in live.items()}  # e.g. phone in a pocket
-        base = self.matcher.match(live)
-        res = self.matcher.match(shifted)
+        matcher = fc.Matcher(self.spots, offset_max=8.0)
+        base = matcher.match(live)
+        res = matcher.match(shifted)
         self.assertEqual(max(res.posterior, key=res.posterior.get), "bedroom")
         self.assertAlmostEqual(res.best.offset - base.best.offset, -6, delta=1.5)
 
     def test_offset_is_clamped(self):
         live = synth_live(random.Random(5), "living", noise=0.5)
-        res = self.matcher.match({s: v + 30 for s, v in live.items()})
-        if res is not None:
-            self.assertLessEqual(abs(res.best.offset), fc.OFFSET_MAX_DB)
+        for cap in (2.0, 8.0):
+            res = fc.Matcher(self.spots, offset_max=cap).match({s: v + 30 for s, v in live.items()})
+            if res is not None:
+                self.assertLessEqual(abs(res.best.offset), cap)
+
+    def test_offset_off_by_default_and_needs_agreement(self):
+        live = synth_live(random.Random(5), "living", noise=0.5)
+        shifted = {s: v - 6 for s, v in live.items()}
+        self.assertEqual(fc.OFFSET_MAX_DB, 0.0)
+        self.assertEqual(self.matcher.match(shifted).best.offset, 0.0)
+        # Too few strong common scanners to agree: no offset.
+        many = fc.Matcher(self.spots, offset_max=8.0, offset_min_scanners=50)
+        self.assertEqual(many.match(shifted).best.offset, 0.0)
 
     def test_offline_scanner_is_ignored(self):
         # The kitchen's strongest scanner goes offline: it is neither heard nor in `active`.
@@ -206,7 +217,7 @@ class TestMatcher(unittest.TestCase):
         self.assertIsNone(fc.Matcher([]).match({"aa:00:00:00:00:01": -60.0}))
 
     def test_without_offset(self):
-        m = fc.Matcher(self.spots, use_offset=False)
+        m = fc.Matcher(self.spots, use_offset=False, offset_max=8.0)
         self.assertGreaterEqual(self.accuracy(m), 0.85)
         res = m.match(synth_live(random.Random(1), "kitchen"))
         self.assertEqual(res.best.offset, 0.0)
@@ -216,6 +227,107 @@ class TestMatcher(unittest.TestCase):
         hot = fc.Matcher(self.spots, temperature=4.0).match(live)
         cold = fc.Matcher(self.spots, temperature=0.25).match(live)
         self.assertGreater(max(cold.posterior.values()), max(hot.posterior.values()))
+
+
+    def test_bayes_method_classifies(self):
+        self.assertGreaterEqual(self.accuracy(fc.Matcher(self.spots, method=fc.METHOD_BAYES)), 0.85)
+
+    def test_invalid_options(self):
+        with self.assertRaises(ValueError):
+            fc.Matcher(self.spots, method="nope")
+        with self.assertRaises(ValueError):
+            fc.Matcher(self.spots, room_agg="nope")
+
+    def test_outlier(self):
+        # Spots only in kitchen and living; a live vector from the bathroom is far from all of them.
+        spots = [s for s in self.spots if s["room"] in ("kitchen", "living")]
+        matcher = fc.Matcher(spots, outlier_db=7.0)  # the synthetic house is small; real default is OUTLIER_DB
+        rng = random.Random(4)
+        inside = [matcher.match(synth_live(rng, "kitchen")) for _ in range(20)]
+        self.assertFalse(any(r.outlier for r in inside))
+        far = [matcher.match(synth_live(rng, "bathroom")) for _ in range(20)]
+        self.assertTrue(all(r.outlier for r in far))
+        self.assertTrue(all(r.distance > 7.0 for r in far))
+        off = fc.Matcher(spots, outlier_db=0).match(synth_live(rng, "bathroom"))
+        self.assertFalse(off.outlier)
+
+    def test_unknown_strong_scanner_raises_distance_only(self):
+        live = synth_live(random.Random(11), "living")
+        base = self.matcher.match(live)
+        res = self.matcher.match({**live, "ff:ff:ff:ff:ff:01": -45.0})
+        self.assertAlmostEqual(res.best.score, base.best.score)
+        self.assertGreater(res.distance, base.distance + 5)
+        self.assertTrue(res.outlier)
+
+
+def _spot(spot_id, room, means, std=4.0, seen=1.0):
+    return {
+        "id": spot_id,
+        "room": room,
+        "scanners": {s: {"mean": m, "std": std, "n": 15, "seen": seen if m > -93 else 0.5} for s, m in means.items()},
+    }
+
+
+class TestAdjacentRooms(unittest.TestCase):
+    """
+    Two adjacent rooms sharing their strongest scanners (made-up numbers modelled on a
+    bedroom and its walk-in closet). The closet spots list many more weak far scanners.
+    A bedroom window that hears fewer scanners must not drift to the closet (the fp3 bias:
+    each spot was averaged over its own scanners, diluting the misfit of scanner-rich spots).
+    """
+
+    S = [f"bb:00:00:00:00:{i:02x}" for i in range(1, 13)]
+
+    def spots(self):
+        s = self.S
+        bed = {s[0]: -79, s[1]: -74, s[2]: -79, s[3]: -87, s[4]: -95, s[5]: -97}
+        closet_far = {s[i]: -96 for i in range(6, 12)}
+        out = []
+        for i, d in enumerate((0, 3, -3, 2)):
+            out.append(_spot(f"bed{i}", "bed", {k: v + (d if j < 3 else 0) for j, (k, v) in enumerate(bed.items())}))
+        closet = {s[0]: -69, s[1]: -73, s[2]: -80, s[3]: -86, s[4]: -91, s[5]: -94, **closet_far}
+        out.append(_spot("closet0", "closet", closet))
+        out.append(_spot("closet1", "closet", {**closet, s[0]: -67, s[1]: -76}))
+        return out
+
+    def bed_windows(self):
+        s = self.S
+        rng = random.Random(8)
+        for _ in range(30):
+            vec = {s[0]: -79, s[1]: -74, s[2]: -79, s[3]: -87, s[4]: -95}
+            vec = {k: v + rng.gauss(0, 3) for k, v in vec.items()}
+            if rng.random() < 0.5:
+                vec[s[5]] = -97 + rng.gauss(0, 1)
+            yield vec
+
+    def test_bed_not_pulled_to_closet(self):
+        for method in fc.METHODS:
+            matcher = fc.Matcher(self.spots(), method=method)
+            wrong = 0
+            for vec in self.bed_windows():
+                res = matcher.match(vec)
+                wrong += max(res.posterior, key=res.posterior.get) != "bed"
+            self.assertLessEqual(wrong, 3, method)
+
+    def test_same_scanner_set_for_every_spot(self):
+        matcher = fc.Matcher(self.spots())
+        res = matcher.match(next(self.bed_windows()))
+        self.assertEqual(len({sc.used for sc in res.room_best.values()}), 1)
+
+    def test_closet_still_found(self):
+        s = self.S
+        live = {s[0]: -68, s[1]: -74, s[2]: -80, s[3]: -86, s[4]: -91, s[5]: -94, s[6]: -96, s[8]: -97}
+        res = fc.Matcher(self.spots()).match(live)
+        self.assertEqual(max(res.posterior, key=res.posterior.get), "closet")
+
+    def test_room_count_does_not_win(self):
+        # Many near-identical bed spots must not outvote one equally good closet spot.
+        s = self.S
+        base = {s[0]: -75, s[1]: -75, s[2]: -80, s[3]: -88}
+        spots = [_spot(f"bed{i}", "bed", {**base, s[0]: -75 + i}) for i in range(8)]
+        spots.append(_spot("closet", "closet", {**base, s[0]: -72}))
+        res = fc.Matcher(spots).match({**base, s[0]: -72.0})
+        self.assertEqual(max(res.posterior, key=res.posterior.get), "closet")
 
 
 class TestSmoother(unittest.TestCase):
@@ -255,6 +367,13 @@ class TestSmoother(unittest.TestCase):
         self.assertEqual(r.incumbent, "a")
         self.assertGreater(sm.ema["a"], 0.8)
 
+    def test_outlier_reason(self):
+        sm = fc.RoomSmoother(tau=0.001)
+        sm.update({"a": 0.9, "b": 0.1}, 0.0)
+        r = sm.update(None, 2.0, reason=fc.REASON_OUTLIER)
+        self.assertEqual((r.room, r.reason), (None, fc.REASON_OUTLIER))
+        self.assertEqual(sm.incumbent, "a")
+
     def test_no_data_and_reset(self):
         sm = fc.RoomSmoother(tau=0.001, reset_after=30)
         sm.update({"a": 0.9, "b": 0.1}, 0.0)
@@ -280,6 +399,13 @@ class TestEvaluate(unittest.TestCase):
         self.assertTrue(all(s["baseline_accuracy"] == 0 for s in attic))
         self.assertEqual(sum(sum(r.values()) for r in out["confusion"].values()), out["windows"])
         self.assertLessEqual(len(out["worst_spots"]), 5)
+        self.assertGreaterEqual(out["balanced_accuracy"], 0.8)
+        self.assertEqual(set(out["room_recall"]), set(ROOMS))
+        self.assertLess(out["mean_confidence"], 1.0)
+        self.assertIsNotNone(out["log_loss"])
+        self.assertLessEqual(out["outlier_share"], 0.05)
+        self.assertGreaterEqual(out["effective_accuracy"], out["baseline_accuracy"])
+        self.assertIn("baseline_balanced_accuracy", out)
 
     def test_nearest_proxy_offsets(self):
         vec = {"aa:00:00:00:00:01": -70.0, "aa:00:00:00:00:03": -68.0}

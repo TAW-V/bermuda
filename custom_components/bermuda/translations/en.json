@@ -39,7 +39,11 @@
           "attenuation": "Attenuation - Environment attenuation factor for distance calculation/calibration.",
           "ref_power": "Reference Power - Default rssi at 1 metre distance, for distance calibration.",
           "configured_devices": "Configured Devices - Select which Bluetooth devices or Beacons to track with Sensors.",
-          "fingerprint_mode": "Fingerprint mode"
+          "fingerprint_mode": "Fingerprint mode",
+          "fingerprint_method": "Fingerprint matcher",
+          "fingerprint_offset_max": "Fingerprint device offset cap (dB)",
+          "fingerprint_outlier_db": "Fingerprint outlier distance (dB)",
+          "fingerprint_min_confidence": "Fingerprint minimum confidence"
         },
         "data_description": {
           "max_area_radius": "In the simple `AREA` feature, a device will be marked as being in the AREA of it's closest receiver, if inside this radius. If you set it small, devices will go to `unknown` between receivers, but if large devices will always appear as in their closest Area.",
@@ -49,7 +53,11 @@
           "smoothing_samples": "How many samples to average distance smoothing. Bigger numbers make for slower distance increases. Shortening distances are not affected. 10 or 20 seems good.",
           "attenuation": "After setting ref_power at 1 metre, adjust attenuation so that other distances read correctly - more or less.",
           "ref_power": "Put your most-common beacon 1 metre (3.28') away from your most-common proxy / scanner. Adjust ref_power until the distance sensor shows a lowest (not average) distance of 1 metre.",
-          "fingerprint_mode": "RSSI fingerprinting. `off`: no matching and no fingerprint sensors. `shadow`: a separate Fingerprint room sensor, Bermuda's Area is unchanged. `override`: Area and Floor follow the fingerprint room when it is confident and mapped to an HA area, otherwise Bermuda's nearest-proxy result."
+          "fingerprint_mode": "RSSI fingerprinting. `off`: no matching and no fingerprint sensors. `shadow`: a separate Fingerprint room sensor, Bermuda's Area is unchanged. `override`: Area and Floor follow the fingerprint room when it is confident and mapped to an HA area, otherwise Bermuda's nearest-proxy result.",
+          "fingerprint_method": "`knn` (default): compares absolute RSSI levels with every recorded spot; robust when more or fewer far scanners are heard. `bayes`: naive Bayes with a heard/not-heard term; can be sharper but leans on how many weak scanners are heard.",
+          "fingerprint_offset_max": "Estimate a per-device level offset (phone in a pocket, another transmitter) up to this many dB. 0 (default) disables it: between adjacent rooms the absolute level is often the only difference.",
+          "fingerprint_outlier_db": "If even the nearest recorded spot is farther than this (RMS dB over the heard scanners), the position is not covered by any spot and Bermuda's nearest-proxy area is used. Default 10. 0 disables the check.",
+          "fingerprint_min_confidence": "Below this smoothed room probability the nearest-proxy area is used. Default 0.5."
         }
       },
       "selectdevices": {
@@ -203,11 +211,23 @@
       "fields": {
         "use_offset": {
           "name": "Use device offset",
-          "description": "Estimate a per-spot device/carry offset."
+          "description": "Off forces the offset cap to 0."
         },
         "temperature": {
           "name": "Temperature",
-          "description": "Softmax temperature for the room posterior."
+          "description": "Softmax temperature for the room posterior (default: the method's tuned value)."
+        },
+        "method": {
+          "name": "Method",
+          "description": "Matcher to evaluate (default: the configured one)."
+        },
+        "offset_max": {
+          "name": "Offset cap",
+          "description": "Device offset cap in dB (0 = off; default: configured)."
+        },
+        "outlier_db": {
+          "name": "Outlier distance",
+          "description": "Outlier threshold in dB (0 = off; default: configured)."
         },
         "details": {
           "name": "Details",
@@ -242,6 +262,12 @@
         "off": "Off",
         "shadow": "Shadow (separate sensor)",
         "override": "Override (drives Area)"
+      }
+    },
+    "fingerprint_method": {
+      "options": {
+        "knn": "kNN on spot levels (default)",
+        "bayes": "Naive Bayes (fp3)"
       }
     }
   }

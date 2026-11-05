@@ -96,14 +96,37 @@ clear_fingerprints:
 list_fingerprints:
 evaluate_fingerprints:
   fields:
+    method:
+      required: false
+      selector:
+        select:
+          options:
+            - knn
+            - bayes
+    offset_max:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 0.5
+          unit_of_measurement: dB
+          mode: box
+    outlier_db:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 40
+          step: 0.5
+          unit_of_measurement: dB
+          mode: box
     use_offset:
       required: false
-      default: true
       selector:
         boolean:
     temperature:
       required: false
-      default: 0.5
       selector:
         number:
           min: 0.05

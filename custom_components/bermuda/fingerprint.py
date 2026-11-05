@@ -35,17 +35,27 @@ from homeassistant.util.dt import now as dt_now
 from .const import (
     _LOGGER,
     CONF_FINGERPRINT_MODE,
+    CONF_FP_METHOD,
+    CONF_FP_MIN_CONFIDENCE,
+    CONF_FP_OFFSET_MAX,
+    CONF_FP_OUTLIER_DB,
     CONF_RSSI_OFFSETS,
     DEFAULT_FINGERPRINT_MODE,
+    DEFAULT_FP_METHOD,
+    DEFAULT_FP_MIN_CONFIDENCE,
+    DEFAULT_FP_OFFSET_MAX,
+    DEFAULT_FP_OUTLIER_DB,
     DOMAIN,
     FINGERPRINT_MODE_OFF,
     FINGERPRINT_MODE_OVERRIDE,
 )
 from .fingerprint_core import (
     LIVE_WINDOW_S,
+    METHODS,
     REASON_MATCH,
+    REASON_NO_DATA,
     REASON_NO_FP,
-    TEMPERATURE,
+    REASON_OUTLIER,
     Matcher,
     RoomSmoother,
     SpotRecorder,
@@ -138,7 +148,15 @@ class FingerprintManager:
     def __init__(self, hass: HomeAssistant, coordinator: BermudaDataUpdateCoordinator) -> None:
         self.hass = hass
         self.coordinator = coordinator
-        self.mode: str = coordinator.options.get(CONF_FINGERPRINT_MODE, DEFAULT_FINGERPRINT_MODE)
+        opts = coordinator.options
+        self.mode: str = opts.get(CONF_FINGERPRINT_MODE, DEFAULT_FINGERPRINT_MODE)
+        method = opts.get(CONF_FP_METHOD, DEFAULT_FP_METHOD)
+        self.matcher_kwargs: dict[str, Any] = {
+            "method": method if method in METHODS else DEFAULT_FP_METHOD,
+            "offset_max": float(opts.get(CONF_FP_OFFSET_MAX, DEFAULT_FP_OFFSET_MAX)),
+            "outlier_db": float(opts.get(CONF_FP_OUTLIER_DB, DEFAULT_FP_OUTLIER_DB)),
+        }
+        self.min_confidence = float(opts.get(CONF_FP_MIN_CONFIDENCE, DEFAULT_FP_MIN_CONFIDENCE))
         self._store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, STORE_KEY)
         self.spots: list[dict[str, Any]] = []
         self.rooms: dict[str, dict[str, Any]] = {}
@@ -173,7 +191,7 @@ class FingerprintManager:
         if self.recording is not None:
             used.add(self.recording.room)
         self.rooms = {k: v for k, v in self.rooms.items() if k in used}
-        self.matcher = Matcher(self.spots) if self.spots else None
+        self.matcher = Matcher(self.spots, **self.matcher_kwargs) if self.spots else None
         self.spots_version += 1
         if save:
             self._store.async_delay_save(self._data_to_save, SAVE_DELAY)
@@ -330,10 +348,11 @@ class FingerprintManager:
             self._svc_evaluate,
             vol.Schema(
                 {
-                    vol.Optional("use_offset", default=True): cv.boolean,
-                    vol.Optional("temperature", default=TEMPERATURE): vol.All(
-                        vol.Coerce(float), vol.Range(min=0.05, max=20)
-                    ),
+                    vol.Optional("method"): vol.In(METHODS),
+                    vol.Optional("offset_max"): vol.All(vol.Coerce(float), vol.Range(min=0, max=10)),
+                    vol.Optional("outlier_db"): vol.All(vol.Coerce(float), vol.Range(min=0, max=40)),
+                    vol.Optional("use_offset"): cv.boolean,
+                    vol.Optional("temperature"): vol.All(vol.Coerce(float), vol.Range(min=0.05, max=20)),
                     vol.Optional("details", default=False): cv.boolean,
                 }
             ),
@@ -439,15 +458,23 @@ class FingerprintManager:
                 scanner_room[scanner.address] = key
         spots = list(self.spots)
         offsets = dict(self.coordinator.options.get(CONF_RSSI_OFFSETS, {}))
+        # Defaults: the configured matcher; service fields override for experiments.
+        kwargs = dict(self.matcher_kwargs)
+        for key in ("method", "offset_max", "outlier_db", "temperature"):
+            if key in call.data:
+                kwargs[key] = call.data[key]
+        if call.data.get("use_offset") is False:
+            kwargs["offset_max"] = 0.0
         result = await self.hass.async_add_executor_job(
             lambda: evaluate(
                 spots,
                 scanner_room=scanner_room,
                 rssi_offsets=offsets,
-                use_offset=call.data["use_offset"],
-                temperature=call.data["temperature"],
+                min_confidence=self.min_confidence,
+                **kwargs,
             )
         )
+        result["matcher"] = kwargs
         names = {k: self.room_name(k) for k in self.rooms}
         result["room_names"] = names
         if not call.data["details"]:
@@ -609,7 +636,9 @@ class FingerprintManager:
         return readings
 
     def _update_device(self, device: BermudaDevice, nowstamp: float, active: set[str]) -> None:
-        smoother = self._smoothers.setdefault(device.address, RoomSmoother())
+        smoother = self._smoothers.get(device.address)
+        if smoother is None:
+            smoother = self._smoothers[device.address] = RoomSmoother(min_confidence=self.min_confidence)
         detail: dict[str, Any] = {}
         match = None
         if self.matcher is None:
@@ -620,7 +649,12 @@ class FingerprintManager:
                 live = live_vector(self._live_readings(device, nowstamp), nowstamp)
                 match = self.matcher.match(live, active)
                 detail["heard_scanners"] = len(live)
-            smoothed = smoother.update(match.posterior if match else None, nowstamp)
+            if match is None:
+                smoothed = smoother.update(None, nowstamp)
+            elif match.outlier:  # far from every spot: probably a room without spots
+                smoothed = smoother.update(None, nowstamp, reason=REASON_OUTLIER)
+            else:
+                smoothed = smoother.update(match.posterior, nowstamp)
             reason = smoothed.reason
 
         if match is not None:
@@ -638,6 +672,8 @@ class FingerprintManager:
                 detail["margin"] = round(detail["best"]["p"] - detail["second"]["p"], 2)
             detail["common_scanners"] = match.best.common
             detail["offset_db"] = round(match.best.offset, 1)
+            detail["distance_db"] = round(match.distance, 1)
+            detail["outlier"] = match.outlier
         if smoothed is not None:
             detail["holding"] = smoothed.holding
             detail["smoothed_room"] = self.room_name(smoothed.incumbent)
@@ -647,7 +683,10 @@ class FingerprintManager:
         detail["nearest_area"] = nearest_name
 
         state = FingerprintState(reason=reason, detail=detail)
-        state.confidence = smoothed.confidence if smoothed is not None else 0.0
+        # No fingerprint evidence this cycle (outlier / no data): confidence 0, not a stale EMA.
+        state.confidence = (
+            smoothed.confidence if smoothed is not None and reason not in (REASON_OUTLIER, REASON_NO_DATA) else 0.0
+        )
         if smoothed is not None and smoothed.room is not None:
             state.room = smoothed.room
             state.name = self.room_name(smoothed.room)
