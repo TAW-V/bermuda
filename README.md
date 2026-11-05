@@ -47,8 +47,10 @@ live signal pattern against those recordings.
 
 ### Dashboard card
 
-The fork ships a Lovelace card, `custom:bermuda-fingerprint-card`. The integration serves it and loads it
-automatically, so there is no resource to add. Add it from the card picker ("Bermuda fingerprint card") or in YAML:
+The fork ships a Lovelace card, `custom:bermuda-fingerprint-card`. The integration serves it and keeps a
+Lovelace resource for it up to date (`/bermuda_frontend/bermuda-fingerprint-card.js?v=<hash>`), so there is
+nothing to add by hand. With YAML-managed resources it loads the card on every page instead. Add it from the card
+picker ("Bermuda fingerprint card") or in YAML:
 
 ```yaml
 type: custom:bermuda-fingerprint-card

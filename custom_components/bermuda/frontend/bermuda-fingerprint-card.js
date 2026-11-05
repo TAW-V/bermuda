@@ -14,7 +14,7 @@
  *   status_entity / spots_entity: override the global Bermuda sensors if renamed
  */
 
-const CARD_VERSION = "0.8.7-fp2";
+const CARD_VERSION = "0.8.7-fp3";
 const DEFAULT_STATUS = "sensor.bermuda_global_fingerprint_status";
 const DEFAULT_SPOTS = "sensor.bermuda_global_fingerprint_spots";
 const CONFIRM_MS = 4000;
@@ -52,6 +52,7 @@ const STRINGS = {
     device: "Device (any Bermuda entity of the device)",
     duration: "Recording duration (s)",
     show_empty: "Show areas without spots",
+    error: "The fingerprint card hit an error: {e}",
   },
   nl: {
     title: "Fingerprints",
@@ -85,6 +86,7 @@ const STRINGS = {
     device: "Apparaat (een Bermuda-entiteit van het apparaat)",
     duration: "Opnameduur (s)",
     show_empty: "Ruimtes zonder locaties tonen",
+    error: "De fingerprint-kaart liep tegen een fout aan: {e}",
   },
 };
 
@@ -106,10 +108,11 @@ function esc(v) {
 /** Find the global and per-device Bermuda fingerprint entities. */
 function findEntities(hass, config) {
   const ents = hass.entities || {};
+  const states = hass.states || {};
   const bermuda = Object.keys(ents).filter((id) => ents[id].platform === "bermuda");
   const pick = (cfg, def, suffix) => {
     if (cfg) return cfg;
-    if (hass.states[def]) return def;
+    if (states[def]) return def;
     return bermuda.find((id) => id.startsWith("sensor.") && id.endsWith(suffix)) || def;
   };
   const status = pick(config.status_entity, DEFAULT_STATUS, "_fingerprint_status");
@@ -133,14 +136,50 @@ function findEntities(hass, config) {
 }
 
 class BermudaFingerprintCard extends HTMLElement {
+  // Every lifecycle method below catches its own errors and shows them inside the card: a throw from
+  // setConfig or the hass setter makes Lovelace swap in its generic "Configuration error" card.
   constructor() {
     super();
-    this.attachShadow({ mode: "open" });
     this._expanded = new Set();
     this._confirm = null; // {key, until}
     this._registry = null; // {areas, floors}
     this._sig = null;
-    this.shadowRoot.addEventListener("click", (ev) => this._onClick(ev));
+    this._config = { duration: 60, show_areas_without_spots: true, exclude_areas: [] };
+  }
+
+  _root() {
+    if (!this.shadowRoot) {
+      this.attachShadow({ mode: "open" });
+      this.shadowRoot.addEventListener("click", (ev) => {
+        try {
+          this._onClick(ev);
+        } catch (err) {
+          this._showError(err);
+        }
+      });
+    }
+    return this.shadowRoot;
+  }
+
+  connectedCallback() {
+    try {
+      this._sig = null;
+      this._render();
+    } catch (err) {
+      this._showError(err);
+    }
+  }
+
+  _showError(err) {
+    // eslint-disable-next-line no-console
+    console.error("bermuda-fingerprint-card", err);
+    try {
+      const msg = esc(t(this._hass, "error", { e: (err && err.message) || String(err) }));
+      this._sig = null;
+      this._root().innerHTML = `<style>${STYLE}</style><ha-card><div class="msg warn">${msg}</div></ha-card>`;
+    } catch (_e) {
+      /* nothing left to do */
+    }
   }
 
   static getStubConfig() {
@@ -152,26 +191,39 @@ class BermudaFingerprintCard extends HTMLElement {
   }
 
   setConfig(config) {
-    const d = Number(config && config.duration);
-    config = config || {};
-    this._config = {
-      ...config,
-      duration: d >= 30 && d <= 600 ? Math.round(d) : 60,
-      show_areas_without_spots: config.show_areas_without_spots !== false,
-      exclude_areas: Array.isArray(config.exclude_areas) ? config.exclude_areas : [],
-    };
-    this._sig = null;
-    if (this._hass) this._render();
+    try {
+      config = config && typeof config === "object" ? config : {};
+      const d = Number(config.duration);
+      this._config = {
+        ...config,
+        duration: d >= 30 && d <= 600 ? Math.round(d) : 60,
+        show_areas_without_spots: config.show_areas_without_spots !== false,
+        exclude_areas: Array.isArray(config.exclude_areas) ? config.exclude_areas : [],
+      };
+      this._sig = null;
+      if (this._hass) this._render();
+    } catch (err) {
+      this._showError(err);
+    }
   }
 
   set hass(hass) {
     this._hass = hass;
-    if (!this._hasRegistry(hass) && !this._registry && !this._loading) this._loadRegistry();
-    this._render();
+    try {
+      if (!hass) return;
+      if (!this._hasRegistry(hass) && !this._registry && !this._loading) this._loadRegistry();
+      this._render();
+    } catch (err) {
+      this._showError(err);
+    }
+  }
+
+  get hass() {
+    return this._hass;
   }
 
   _hasRegistry(hass) {
-    return !!(hass.areas && hass.floors && Object.keys(hass.areas).length);
+    return !!(hass && hass.areas && hass.floors && Object.keys(hass.areas).length);
   }
 
   /** Areas and floors: live from the frontend's hass object when available, else fetched once via websocket. */
@@ -191,6 +243,7 @@ class BermudaFingerprintCard extends HTMLElement {
 
   async _loadRegistry() {
     const hass = this._hass;
+    if (!hass || typeof hass.callWS !== "function") return;
     this._loading = true;
     try {
       const [areas, floors] = await Promise.all([
@@ -203,7 +256,11 @@ class BermudaFingerprintCard extends HTMLElement {
     }
     this._loading = false;
     this._sig = null;
-    this._render();
+    try {
+      this._render();
+    } catch (err) {
+      this._showError(err);
+    }
   }
 
   _toast(message) {
@@ -229,7 +286,11 @@ class BermudaFingerprintCard extends HTMLElement {
       if (this._confirm && this._confirm.key === key && Date.now() >= this._confirm.until) {
         this._confirm = null;
         this._sig = null;
-        this._render();
+        try {
+          this._render();
+        } catch (err) {
+          this._showError(err);
+        }
       }
     }, CONFIRM_MS + 50);
     this._sig = null;
@@ -268,32 +329,36 @@ class BermudaFingerprintCard extends HTMLElement {
     const hass = this._hass;
     if (!hass || !this._config) return;
     const ents = (this._ents = findEntities(hass, this._config));
-    const st = hass.states;
+    const st = hass.states || {};
     const sig = [st[ents.status], st[ents.spots], st[ents.room], st[ents.area], this._registry, hass.areas, hass.floors, lang(hass)];
     if (this._sig && sig.every((v, i) => v === this._sig[i])) return;
     this._sig = sig;
-    this.shadowRoot.innerHTML = `<style>${STYLE}</style><ha-card>${this._body(ents)}</ha-card>`;
+    this._root().innerHTML = `<style>${STYLE}</style><ha-card>${this._body(ents)}</ha-card>`;
   }
 
   _body(ents) {
     const hass = this._hass;
     const cfg = this._config;
-    const spotsState = hass.states[ents.spots];
-    const statusState = hass.states[ents.status];
+    const states = hass.states || {};
+    const spotsState = states[ents.spots];
+    const statusState = states[ents.status];
     const title = esc(cfg.title || t(hass, "title"));
     if (!spotsState || !statusState || spotsState.state === "unavailable") {
       return `<div class="hdr"><ha-icon icon="mdi:fingerprint"></ha-icon><span>${title}</span></div>
         <div class="msg warn">${esc(t(hass, "unavailable"))}</div>`;
     }
-    const spotAreas = spotsState.attributes.areas || {};
+    const spotAreas = (spotsState.attributes && spotsState.attributes.areas) || {};
     const reg = this._getRegistry();
     const exclude = new Set(cfg.exclude_areas);
-    const areas = reg.areas.filter((a) => !exclude.has(a.area_id));
+    const areas = (reg.areas || []).filter((a) => a && !exclude.has(a.area_id));
     // Label-only rooms (not HA areas) from the integration
     for (const [key, a] of Object.entries(spotAreas)) {
-      if (!a.area_id && !exclude.has(key) && a.count) areas.push({ area_id: key, name: a.name, floor_id: null, label: true });
+      if (a && !a.area_id && !exclude.has(key) && a.count) areas.push({ area_id: key, name: a.name || key, floor_id: null, label: true });
     }
-    const counted = areas.map((a) => ({ ...a, info: spotAreas[a.area_id] || { count: 0, spots: [] } }));
+    const counted = areas.map((a) => {
+      const info = spotAreas[a.area_id] || {};
+      return { ...a, name: String(a.name || a.area_id), info: { count: Number(info.count) || 0, spots: Array.isArray(info.spots) ? info.spots : [] } };
+    });
     const total = counted.reduce((n, a) => n + a.info.count, 0);
     const withSpots = counted.filter((a) => a.info.count > 0).length;
 
@@ -302,12 +367,16 @@ class BermudaFingerprintCard extends HTMLElement {
     html += this._live(ents);
     html += this._status(statusState);
 
-    const floors = [...reg.floors].sort((a, b) => (a.level ?? 0) - (b.level ?? 0) || a.name.localeCompare(b.name));
+    const floors = (reg.floors || [])
+      .filter((f) => f && f.floor_id)
+      .map((f) => ({ ...f, name: String(f.name || f.floor_id) }))
+      .sort((a, b) => (a.level ?? 0) - (b.level ?? 0) || a.name.localeCompare(b.name));
     const groups = floors.map((f) => ({ name: f.name, icon: f.icon, areas: counted.filter((a) => a.floor_id === f.floor_id) }));
     const known = new Set(floors.map((f) => f.floor_id));
     groups.push({ name: t(hass, "other_floor"), icon: null, areas: counted.filter((a) => !a.floor_id || !known.has(a.floor_id)) });
 
-    const recArea = statusState.state === "recording" ? statusState.attributes.area_id || statusState.attributes.room : null;
+    const sa = statusState.attributes || {};
+    const recArea = statusState.state === "recording" ? sa.area_id || sa.room : null;
     for (const g of groups) {
       const list = g.areas
         .filter((a) => cfg.show_areas_without_spots || a.info.count > 0)
@@ -321,11 +390,13 @@ class BermudaFingerprintCard extends HTMLElement {
 
   _live(ents) {
     const hass = this._hass;
-    const room = ents.room && hass.states[ents.room];
+    const states = hass.states || {};
+    const room = ents.room && states[ents.room];
     if (!room) return "";
-    const area = ents.area && hass.states[ents.area];
-    const conf = Number(room.attributes.confidence || 0);
-    const src = room.attributes.source === "fingerprint" ? `${Math.round(conf * 100)}% ${t(hass, "confidence")}` : t(hass, "fallback");
+    const area = ents.area && states[ents.area];
+    const ra = room.attributes || {};
+    const conf = Number(ra.confidence || 0);
+    const src = ra.source === "fingerprint" ? `${Math.round(conf * 100)}% ${t(hass, "confidence")}` : t(hass, "fallback");
     const val = (s) => (s && !["unknown", "unavailable", ""].includes(s.state) ? s.state : t(hass, "unknown"));
     return `<div class="live">
       <div><div class="k">${esc(t(hass, "fp_room"))}</div><div class="v">${esc(val(room))}</div><div class="s">${esc(src)}</div></div>
@@ -335,7 +406,7 @@ class BermudaFingerprintCard extends HTMLElement {
 
   _status(s) {
     const hass = this._hass;
-    const a = s.attributes;
+    const a = s.attributes || {};
     const vars = { room: esc(a.room_name || ""), label: esc(a.label || ""), samples: a.samples || 0, scanners: a.scanners_heard || 0 };
     if (s.state === "recording") {
       return `<div class="rec">
@@ -346,7 +417,8 @@ class BermudaFingerprintCard extends HTMLElement {
         <div class="s">${esc(t(hass, "left", { ...vars, s: a.seconds_left ?? "" }))}</div></div>`;
     }
     if (["done", "failed", "cancelled"].includes(s.state)) {
-      const w = a.warnings && a.warnings.length ? ` (${esc(t(hass, "warnings", { w: a.warnings.join(", ") }))})` : "";
+      const warn = Array.isArray(a.warnings) ? a.warnings.join(", ") : a.warnings ? String(a.warnings) : "";
+      const w = warn ? ` (${esc(t(hass, "warnings", { w: warn }))})` : "";
       const cls = s.state === "done" ? "ok" : "warn";
       return `<div class="msg ${cls}">${t(hass, s.state, vars)}${w}</div>`;
     }
@@ -369,8 +441,9 @@ class BermudaFingerprintCard extends HTMLElement {
       </div>`;
     if (open) {
       html += `<div class="spots">`;
-      for (const s of a.info.spots || []) {
-        const date = (s.updated || s.created || "").slice(5, 16).replace("T", " ");
+      for (const s of a.info.spots) {
+        if (!s) continue;
+        const date = String(s.updated || s.created || "").slice(5, 16).replace("T", " ");
         const reKey = this._confirm && this._confirm.key === `re:${s.id}`;
         const delKey = this._confirm && this._confirm.key === `del:${s.id}`;
         html += `<div class="spot"><ha-icon icon="mdi:map-marker"></ha-icon>
@@ -447,13 +520,23 @@ const STYLE = `
 
 class BermudaFingerprintCardEditor extends HTMLElement {
   setConfig(config) {
-    this._config = { ...config };
-    this._update();
+    this._config = { ...(config || {}) };
+    try {
+      this._update();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("bermuda-fingerprint-card-editor", err);
+    }
   }
 
   set hass(hass) {
     this._hass = hass;
-    this._update();
+    try {
+      this._update();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("bermuda-fingerprint-card-editor", err);
+    }
   }
 
   _update() {
@@ -479,16 +562,27 @@ class BermudaFingerprintCardEditor extends HTMLElement {
   }
 }
 
-if (!customElements.get("bermuda-fingerprint-card")) {
-  customElements.define("bermuda-fingerprint-card", BermudaFingerprintCard);
-  customElements.define("bermuda-fingerprint-card-editor", BermudaFingerprintCardEditor);
+// Each element is guarded on its own, so loading this file twice (or next to an older copy) never throws.
+try {
+  if (!customElements.get("bermuda-fingerprint-card")) {
+    customElements.define("bermuda-fingerprint-card", BermudaFingerprintCard);
+    // eslint-disable-next-line no-console
+    console.info(`%c BERMUDA-FINGERPRINT-CARD %c ${CARD_VERSION} `, "background:#3f51b5;color:#fff", "");
+  }
+  if (!customElements.get("bermuda-fingerprint-card-editor")) {
+    customElements.define("bermuda-fingerprint-card-editor", BermudaFingerprintCardEditor);
+  }
   window.customCards = window.customCards || [];
-  window.customCards.push({
-    type: "bermuda-fingerprint-card",
-    name: "Bermuda fingerprint card",
-    description: "Record and manage Bermuda RSSI fingerprint spots per area.",
-    preview: false,
-    documentationURL: "https://github.com/TAW-V/bermuda",
-  });
-  console.info(`%c BERMUDA-FINGERPRINT-CARD %c ${CARD_VERSION} `, "background:#3f51b5;color:#fff", "");
+  if (!window.customCards.some((c) => c && c.type === "bermuda-fingerprint-card")) {
+    window.customCards.push({
+      type: "bermuda-fingerprint-card",
+      name: "Bermuda fingerprint card",
+      description: "Record and manage Bermuda RSSI fingerprint spots per area.",
+      preview: false,
+      documentationURL: "https://github.com/TAW-V/bermuda",
+    });
+  }
+} catch (err) {
+  // eslint-disable-next-line no-console
+  console.error("bermuda-fingerprint-card: could not register", err);
 }
