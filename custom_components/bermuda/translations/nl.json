@@ -44,7 +44,12 @@
           "fingerprint_method": "Fingerprint-matcher",
           "fingerprint_offset_max": "Maximale apparaat-offset fingerprint (dB)",
           "fingerprint_outlier_db": "Fingerprint-uitbijterafstand (dB)",
-          "fingerprint_min_confidence": "Minimale zekerheid fingerprint"
+          "fingerprint_min_confidence": "Minimale zekerheid fingerprint",
+          "fingerprint_preset": "Fingerprint ruimtewissel",
+          "fingerprint_live_window": "Fingerprint live-venster (s, aangepast)",
+          "fingerprint_smoothing_tau": "Fingerprint afvlaktijdconstante (s, aangepast)",
+          "fingerprint_confirm_cycles": "Fingerprint bevestigingscycli (aangepast)",
+          "fingerprint_min_dwell": "Fingerprint minimale verblijftijd (s, aangepast)"
         },
         "data_description": {
           "max_area_radius": "Met de eenvoudige `RUIMTE` functie wordt een apparaat gemarkeerd alszijnde in de ruimte van de dichtsbijzijnde scanner, als het zich binnen deze straal bevindt. \nAls deze waarde te te klein wordt ingesteld zullen apparaten als `Onbekend` gemarkeerd worden bij verplaatsing tussen scanners. \nAls deze waarde te groot wordt ingesteld zullen apparaten altijd verschijnen als in hun dichtsbijzijnde ruimte.",
@@ -58,7 +63,12 @@
           "fingerprint_method": "`knn` (standaard): vergelijkt de absolute RSSI-niveaus met elke opgenomen spot; robuust als er meer of minder verre scanners gehoord worden. `bayes`: naive Bayes met een gehoord/niet-gehoord-term; soms scherper, maar leunt op hoeveel zwakke scanners gehoord worden.",
           "fingerprint_offset_max": "Schat een niveau-offset per apparaat (telefoon in de broekzak, ander zendertje) tot zoveel dB. 0 (standaard) zet dit uit: tussen aangrenzende ruimtes is het absolute niveau vaak het enige verschil.",
           "fingerprint_outlier_db": "Als zelfs de dichtstbijzijnde spot verder weg is dan dit (RMS dB over de gehoorde scanners), valt de positie buiten alle spots en geldt de ruimte van de dichtstbijzijnde proxy. Standaard 10. 0 zet de controle uit.",
-          "fingerprint_min_confidence": "Onder deze afgevlakte kans geldt de ruimte van de dichtstbijzijnde proxy. Standaard 0,5."
+          "fingerprint_min_confidence": "Onder deze afgevlakte kans geldt de ruimte van de dichtstbijzijnde proxy. Standaard 0,5.",
+          "fingerprint_preset": "Hoe snel de fingerprint-ruimte een verplaatsing volgt. `fast`: ongeveer 5 s, meer flikkeren. `balanced` (standaard): ongeveer 8 s. `stable`: ongeveer 13 s, minst flikkeren (het gedrag van fp4). `custom`: gebruik de vier waarden hieronder. Die waarden worden alleen bij `custom` gebruikt.",
+          "fingerprint_live_window": "Seconden metingen per scanner waarvan de mediaan de live-vector vormt (3-30). De Shelly-proxies melden ongeveer elke 3 s per scanner, dus 6-12 s bevat 2-4 metingen. Korter reageert sneller maar is onrustiger. fast 6, balanced 8, stable 12.",
+          "fingerprint_smoothing_tau": "Tijdconstante van de exponentiële afvlakking van de ruimtekansen (0-30 s, 0 = geen). De belangrijkste afweging tussen snelheid en flikkeren. fast 2, balanced 3, stable 6.",
+          "fingerprint_confirm_cycles": "Aantal cycli (elk ongeveer 1 s) dat een nieuwe ruimte met marge moet voorliggen voordat die getoond wordt (1-10). Een heel zekere nieuwe ruimte wisselt meteen. fast 1, balanced 2, stable 3.",
+          "fingerprint_min_dwell": "Minimaal aantal seconden tussen twee ruimtewissels (0-60). fast 3, balanced 3, stable 5."
         }
       },
       "selectdevices": {
@@ -267,6 +277,14 @@
       "options": {
         "knn": "kNN op spot-niveaus (standaard)",
         "bayes": "Naive Bayes (fp3)"
+      }
+    },
+    "fingerprint_preset": {
+      "options": {
+        "fast": "Snel (~5 s)",
+        "balanced": "Gebalanceerd (~8 s, standaard)",
+        "stable": "Stabiel (~13 s)",
+        "custom": "Aangepast (waarden hieronder)"
       }
     }
   }

@@ -28,10 +28,15 @@ from .const import (
     CONF_DEVICES,
     CONF_DEVTRACK_TIMEOUT,
     CONF_FINGERPRINT_MODE,
+    CONF_FP_CONFIRM_CYCLES,
+    CONF_FP_LIVE_WINDOW,
     CONF_FP_METHOD,
     CONF_FP_MIN_CONFIDENCE,
+    CONF_FP_MIN_DWELL,
     CONF_FP_OFFSET_MAX,
     CONF_FP_OUTLIER_DB,
+    CONF_FP_PRESET,
+    CONF_FP_TAU,
     CONF_MAX_RADIUS,
     CONF_MAX_VELOCITY,
     CONF_REF_POWER,
@@ -44,10 +49,15 @@ from .const import (
     DEFAULT_ATTENUATION,
     DEFAULT_DEVTRACK_TIMEOUT,
     DEFAULT_FINGERPRINT_MODE,
+    DEFAULT_FP_CONFIRM_CYCLES,
+    DEFAULT_FP_LIVE_WINDOW,
     DEFAULT_FP_METHOD,
     DEFAULT_FP_MIN_CONFIDENCE,
+    DEFAULT_FP_MIN_DWELL,
     DEFAULT_FP_OFFSET_MAX,
     DEFAULT_FP_OUTLIER_DB,
+    DEFAULT_FP_PRESET,
+    DEFAULT_FP_TAU,
     DEFAULT_MAX_RADIUS,
     DEFAULT_MAX_VELOCITY,
     DEFAULT_REF_POWER,
@@ -58,7 +68,14 @@ from .const import (
     DOMAIN_PRIVATE_BLE_DEVICE,
     FINGERPRINT_MODES,
     FP_METHODS,
+    FP_PRESET_NAMES,
     NAME,
+)
+from .fingerprint_core import (  # TAW-V fingerprint
+    CONFIRM_CYCLES_RANGE,
+    LIVE_WINDOW_RANGE,
+    MIN_DWELL_RANGE,
+    SMOOTH_TAU_RANGE,
 )
 from .util import mac_redact, rssi_to_metres
 
@@ -274,6 +291,33 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 CONF_FP_MIN_CONFIDENCE,
                 default=self.options.get(CONF_FP_MIN_CONFIDENCE, DEFAULT_FP_MIN_CONFIDENCE),
             ): vol.All(vol.Coerce(float), vol.Range(min=0, max=0.99)),
+            vol.Required(
+                CONF_FP_PRESET,
+                default=self.options.get(CONF_FP_PRESET, DEFAULT_FP_PRESET),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=FP_PRESET_NAMES,
+                    mode=SelectSelectorMode.DROPDOWN,
+                    translation_key=CONF_FP_PRESET,
+                )
+            ),
+            # Only used with preset "custom"
+            vol.Required(
+                CONF_FP_LIVE_WINDOW,
+                default=self.options.get(CONF_FP_LIVE_WINDOW, DEFAULT_FP_LIVE_WINDOW),
+            ): vol.All(vol.Coerce(float), vol.Range(min=LIVE_WINDOW_RANGE[0], max=LIVE_WINDOW_RANGE[1])),
+            vol.Required(
+                CONF_FP_TAU,
+                default=self.options.get(CONF_FP_TAU, DEFAULT_FP_TAU),
+            ): vol.All(vol.Coerce(float), vol.Range(min=SMOOTH_TAU_RANGE[0], max=SMOOTH_TAU_RANGE[1])),
+            vol.Required(
+                CONF_FP_CONFIRM_CYCLES,
+                default=self.options.get(CONF_FP_CONFIRM_CYCLES, DEFAULT_FP_CONFIRM_CYCLES),
+            ): vol.All(vol.Coerce(int), vol.Range(min=CONFIRM_CYCLES_RANGE[0], max=CONFIRM_CYCLES_RANGE[1])),
+            vol.Required(
+                CONF_FP_MIN_DWELL,
+                default=self.options.get(CONF_FP_MIN_DWELL, DEFAULT_FP_MIN_DWELL),
+            ): vol.All(vol.Coerce(float), vol.Range(min=MIN_DWELL_RANGE[0], max=MIN_DWELL_RANGE[1])),
         }
 
         return self.async_show_form(step_id="globalopts", data_schema=vol.Schema(data_schema))

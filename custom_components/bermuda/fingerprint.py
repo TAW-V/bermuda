@@ -39,18 +39,20 @@ from .const import (
     CONF_FP_MIN_CONFIDENCE,
     CONF_FP_OFFSET_MAX,
     CONF_FP_OUTLIER_DB,
+    CONF_FP_PRESET,
     CONF_RSSI_OFFSETS,
     DEFAULT_FINGERPRINT_MODE,
     DEFAULT_FP_METHOD,
     DEFAULT_FP_MIN_CONFIDENCE,
     DEFAULT_FP_OFFSET_MAX,
     DEFAULT_FP_OUTLIER_DB,
+    DEFAULT_FP_PRESET,
     DOMAIN,
     FINGERPRINT_MODE_OFF,
     FINGERPRINT_MODE_OVERRIDE,
+    FP_SWITCHING_KEYS,
 )
 from .fingerprint_core import (
-    LIVE_WINDOW_S,
     METHODS,
     REASON_MATCH,
     REASON_NO_DATA,
@@ -61,6 +63,8 @@ from .fingerprint_core import (
     SpotRecorder,
     evaluate,
     live_vector,
+    resolve_switching,
+    smoother_kwargs,
 )
 
 if TYPE_CHECKING:
@@ -157,6 +161,16 @@ class FingerprintManager:
             "outlier_db": float(opts.get(CONF_FP_OUTLIER_DB, DEFAULT_FP_OUTLIER_DB)),
         }
         self.min_confidence = float(opts.get(CONF_FP_MIN_CONFIDENCE, DEFAULT_FP_MIN_CONFIDENCE))
+        # Room switching speed: a preset, or custom values from the options.
+        self.preset: str = opts.get(CONF_FP_PRESET, DEFAULT_FP_PRESET)
+        self.switching = resolve_switching(
+            self.preset, {key: opts[opt] for opt, key in FP_SWITCHING_KEYS.items() if opt in opts}
+        )
+        self.live_window: float = self.switching["live_window"]
+        self.smoother_kwargs: dict[str, Any] = {
+            **smoother_kwargs(self.switching),
+            "min_confidence": self.min_confidence,
+        }
         self._store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, STORE_KEY)
         self.spots: list[dict[str, Any]] = []
         self.rooms: dict[str, dict[str, Any]] = {}
@@ -475,6 +489,7 @@ class FingerprintManager:
             )
         )
         result["matcher"] = kwargs
+        result["switching"] = {"preset": self.preset, **self.switching}
         names = {k: self.room_name(k) for k in self.rooms}
         result["room_names"] = names
         if not call.data["details"]:
@@ -626,7 +641,7 @@ class FingerprintManager:
                 fut.set_result(result)
 
     def _live_readings(self, device: BermudaDevice, nowstamp: float) -> dict[str, list[tuple[float, float]]]:
-        cutoff = nowstamp - LIVE_WINDOW_S
+        cutoff = nowstamp - self.live_window
         readings: dict[str, list[tuple[float, float]]] = {}
         for advert in device.adverts.values():
             for stamp, rssi in zip(advert.hist_stamp, advert.hist_rssi, strict=False):
@@ -638,7 +653,7 @@ class FingerprintManager:
     def _update_device(self, device: BermudaDevice, nowstamp: float, active: set[str]) -> None:
         smoother = self._smoothers.get(device.address)
         if smoother is None:
-            smoother = self._smoothers[device.address] = RoomSmoother(min_confidence=self.min_confidence)
+            smoother = self._smoothers[device.address] = RoomSmoother(**self.smoother_kwargs)
         detail: dict[str, Any] = {}
         match = None
         if self.matcher is None:
@@ -646,7 +661,7 @@ class FingerprintManager:
             reason = REASON_NO_FP
         else:
             if nowstamp - device.last_seen <= DEVICE_UNSEEN_S:
-                live = live_vector(self._live_readings(device, nowstamp), nowstamp)
+                live = live_vector(self._live_readings(device, nowstamp), nowstamp, self.live_window)
                 match = self.matcher.match(live, active)
                 detail["heard_scanners"] = len(live)
             if match is None:

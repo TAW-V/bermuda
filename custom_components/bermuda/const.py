@@ -212,7 +212,32 @@ CONF_FP_OUTLIER_DB, DEFAULT_FP_OUTLIER_DB = "fingerprint_outlier_db", _fpc.OUTLI
 DOCS[CONF_FP_OUTLIER_DB] = "Fall back to nearest-proxy when the nearest spot is farther than this (RMS dB); 0 disables."
 CONF_FP_MIN_CONFIDENCE, DEFAULT_FP_MIN_CONFIDENCE = "fingerprint_min_confidence", 0.5
 DOCS[CONF_FP_MIN_CONFIDENCE] = "Fall back to nearest-proxy when the smoothed room probability is below this."
-FINGERPRINT_OPTION_KEYS = (CONF_FP_METHOD, CONF_FP_OFFSET_MAX, CONF_FP_OUTLIER_DB, CONF_FP_MIN_CONFIDENCE)
+# Room switching speed: a preset, or "custom" with the individual values below.
+CONF_FP_PRESET, DEFAULT_FP_PRESET = "fingerprint_preset", _fpc.DEFAULT_PRESET
+FP_PRESET_NAMES = _fpc.PRESETS
+DOCS[CONF_FP_PRESET] = "Room switching: fast (~5 s), balanced (~8 s, default), stable (~13 s) or custom."
+CONF_FP_LIVE_WINDOW, DEFAULT_FP_LIVE_WINDOW = "fingerprint_live_window", _fpc.LIVE_WINDOW_S
+DOCS[CONF_FP_LIVE_WINDOW] = "Custom: seconds of readings per scanner in the live vector (median)."
+CONF_FP_TAU, DEFAULT_FP_TAU = "fingerprint_smoothing_tau", _fpc.SMOOTH_TAU_S
+DOCS[CONF_FP_TAU] = "Custom: time constant (s) of the EMA over the room probabilities; 0 = no smoothing."
+CONF_FP_CONFIRM_CYCLES, DEFAULT_FP_CONFIRM_CYCLES = "fingerprint_confirm_cycles", _fpc.CONFIRM_CYCLES
+DOCS[CONF_FP_CONFIRM_CYCLES] = "Custom: update cycles (~1 s) a new room must lead before it is shown."
+CONF_FP_MIN_DWELL, DEFAULT_FP_MIN_DWELL = "fingerprint_min_dwell", _fpc.MIN_DWELL_S
+DOCS[CONF_FP_MIN_DWELL] = "Custom: minimum seconds between two room switches."
+FP_SWITCHING_KEYS = {  # option -> key in fingerprint_core.resolve_switching()
+    CONF_FP_LIVE_WINDOW: "live_window",
+    CONF_FP_TAU: "tau",
+    CONF_FP_CONFIRM_CYCLES: "confirm_cycles",
+    CONF_FP_MIN_DWELL: "min_dwell",
+}
+FINGERPRINT_OPTION_KEYS = (
+    CONF_FP_METHOD,
+    CONF_FP_OFFSET_MAX,
+    CONF_FP_OUTLIER_DB,
+    CONF_FP_MIN_CONFIDENCE,
+    CONF_FP_PRESET,
+    *FP_SWITCHING_KEYS,
+)
 
 # Defaults
 DEFAULT_NAME = DOMAIN

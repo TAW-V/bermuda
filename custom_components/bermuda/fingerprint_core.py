@@ -11,7 +11,8 @@ Concepts
   device. The per-window medians are kept for leave-one-out evaluation.
 - A *room* is a key (an HA area_id, or a slug for a label-only room). Each spot
   belongs to one room.
-- The live vector is, per scanner, the median raw RSSI over the last ~12 s.
+- The live vector is, per scanner, the median raw RSSI over the last few seconds (8 s by
+  default, configurable together with the smoothing via presets).
 - ``Matcher`` scores every spot over the same set of scanners (all known, online
   scanners), aggregates the spots of a room (count-normalised mixture by default),
   and turns room scores into a posterior via a softmax. Default method ``knn``:
@@ -33,7 +34,6 @@ from typing import Any
 # ---------------------------------------------------------------------------
 RSSI_INVALID = -127  # Readings at or below this are ignored
 WINDOW_S = 10.0  # Recording window length for "seen" and window medians
-LIVE_WINDOW_S = 12.0  # Live vector window
 SIGMA_MIN = 4.0  # bayes: per-scanner std floor
 SIGMA_MAX = 12.0
 SEEN_MIN = 0.05
@@ -54,6 +54,73 @@ OUTLIER_DB = 10.0  # nearest spot farther than this (RMS dB) -> outlier, fall ba
 MIN_COMMON = 3  # Minimum common heard scanners for a spot to be scored
 TEMPERATURE = 0.3  # knn softmax temperature (lowest leave-one-out log-loss)
 TEMPERATURE_BAYES = 0.5  # bayes softmax temperature
+
+# Room switching (live window + RoomSmoother). Tuned with scripts/fingerprint_eval.py --latency on
+# the bedroom / walk-in closet recordings, readings every ~3.1 s per scanner (the Shelly limit, also
+# at 10 Hz advertising). Window and tau set the lag; the flicker that remains is mostly genuine
+# misclassification, so dwell and confirm cycles change little. Simulated, in-sample / leave-out:
+#   fast      6 s, tau 2:  switch ~5 s,  flicker 0.9 / 1.6 per min
+#   balanced  8 s, tau 3:  switch ~8 s,  flicker 0.6 / 1.2 per min (time in a wrong room as fp4)
+#   stable   12 s, tau 6:  switch ~13 s, flicker 0.3 / 0.5 per min (the fp4 behaviour)
+PRESET_FAST = "fast"
+PRESET_BALANCED = "balanced"
+PRESET_STABLE = "stable"
+PRESET_CUSTOM = "custom"  # use the individual options
+FP_PRESETS: dict[str, dict[str, float]] = {
+    PRESET_FAST: {"live_window": 6.0, "tau": 2.0, "confirm_cycles": 1, "min_dwell": 3.0},
+    PRESET_BALANCED: {"live_window": 8.0, "tau": 3.0, "confirm_cycles": 2, "min_dwell": 3.0},
+    PRESET_STABLE: {"live_window": 12.0, "tau": 6.0, "confirm_cycles": 3, "min_dwell": 5.0},
+}
+PRESETS = [PRESET_FAST, PRESET_BALANCED, PRESET_STABLE, PRESET_CUSTOM]
+DEFAULT_PRESET = PRESET_BALANCED
+LIVE_WINDOW_S = FP_PRESETS[DEFAULT_PRESET]["live_window"]  # Live vector window (s)
+SMOOTH_TAU_S = FP_PRESETS[DEFAULT_PRESET]["tau"]  # EMA time constant of the room posteriors (s)
+CONFIRM_CYCLES = int(FP_PRESETS[DEFAULT_PRESET]["confirm_cycles"])  # cycles a challenger must lead by margin
+MIN_DWELL_S = FP_PRESETS[DEFAULT_PRESET]["min_dwell"]  # minimum time between two room switches (s)
+SWITCH_MARGIN = 0.15
+INSTANT_P = 0.85
+# Option ranges (options flow)
+LIVE_WINDOW_RANGE = (3.0, 30.0)
+SMOOTH_TAU_RANGE = (0.0, 30.0)
+CONFIRM_CYCLES_RANGE = (1, 10)
+MIN_DWELL_RANGE = (0.0, 60.0)
+
+
+def resolve_switching(preset: str | None, custom: dict[str, Any] | None = None) -> dict[str, float]:
+    """
+    Live window and smoother settings for a preset; ``custom`` (or an unknown preset) uses the
+    given values, each falling back to the default preset and clamped to the option ranges.
+    """
+    if preset in FP_PRESETS:
+        return dict(FP_PRESETS[preset])
+    base = FP_PRESETS[DEFAULT_PRESET]
+    custom = custom or {}
+
+    def val(key: str, rng: tuple[float, float]) -> float:
+        try:
+            v = float(custom.get(key, base[key]))
+        except (TypeError, ValueError):
+            v = float(base[key])
+        if math.isnan(v):
+            v = float(base[key])
+        return clamp(v, rng[0], rng[1])
+
+    return {
+        "live_window": val("live_window", LIVE_WINDOW_RANGE),
+        "tau": val("tau", SMOOTH_TAU_RANGE),
+        "confirm_cycles": int(round(val("confirm_cycles", CONFIRM_CYCLES_RANGE))),
+        "min_dwell": val("min_dwell", MIN_DWELL_RANGE),
+    }
+
+
+def smoother_kwargs(settings: dict[str, Any]) -> dict[str, Any]:
+    """RoomSmoother kwargs from a preset / settings dict (ignores live_window)."""
+    return {
+        "tau": float(settings.get("tau", SMOOTH_TAU_S)),
+        "confirm_cycles": int(settings.get("confirm_cycles", CONFIRM_CYCLES)),
+        "min_dwell": float(settings.get("min_dwell", MIN_DWELL_S)),
+    }
+
 
 _LOG_SQRT_2PI = 0.5 * math.log(2 * math.pi)
 
@@ -465,11 +532,11 @@ class RoomSmoother:
     def __init__(
         self,
         *,
-        tau: float = 6.0,
-        margin: float = 0.15,
-        confirm_cycles: int = 3,
-        instant_p: float = 0.85,
-        min_dwell: float = 5.0,
+        tau: float = SMOOTH_TAU_S,
+        margin: float = SWITCH_MARGIN,
+        confirm_cycles: int = CONFIRM_CYCLES,
+        instant_p: float = INSTANT_P,
+        min_dwell: float = MIN_DWELL_S,
         min_confidence: float = 0.5,
         reset_after: float = 30.0,
     ) -> None:

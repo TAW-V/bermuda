@@ -9,12 +9,21 @@ runs leave-one-spot-out evaluations of ``fingerprint_core.Matcher`` variants:
     python3 -I scripts/fingerprint_eval.py --storage /config/.storage
     python3 -I scripts/fingerprint_eval.py --storage /config/.storage --json out.json
     python3 -I scripts/fingerprint_eval.py --storage /config/.storage --only knn
+    python3 -I scripts/fingerprint_eval.py --storage /config/.storage --latency --rooms bedroom closet
 
 For every variant it prints the window accuracy, the balanced accuracy (mean
 per-room recall, so a room with more spots does not dominate), the log-loss and
 mean confidence of the posterior, the outlier share, and a smoothed accuracy
 (RoomSmoother over the held-out windows, with fallback to nearest-proxy).
 ``--confusion A B`` adds the A -> B confusion count.
+
+``--latency`` replays room changes instead: synthetic raw readings regenerated from the stored
+spots at the measured Shelly rate (one reading per scanner every >= 3.1 s), spot A then spot B
+of another room, fed through live_vector + Matcher + RoomSmoother every 1.05 s. It reports the
+time until the shown room switches (median / p90), until it stays switched, and the flicker
+(room changes per minute, share of time in a wrong room) while standing still at one spot, for
+the presets and a grid of live window / tau / confirm cycles / dwell. ``--in-sample`` keeps the
+replayed spots in the matcher, ``--detail`` splits per direction and room.
 
 The recordings stay where they are; nothing is written unless --json is given.
 """
@@ -24,6 +33,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import random
 import sys
 from pathlib import Path
@@ -148,6 +158,288 @@ def stress(spots: list[dict], pair: tuple[str, str], **matcher_kwargs) -> dict[s
     return out
 
 
+# ---------------------------------------------------------------------------
+# Switching latency / flicker simulation
+# ---------------------------------------------------------------------------
+MIN_INTERVAL_S = 3.1  # measured: a Shelly forwards at most one reading per device every ~3.1 s
+CYCLE_S = 1.05  # Bermuda's update cycle
+
+
+class SpotSampler:
+    """
+    Synthetic raw readings for one recorded spot.
+
+    The stored spot keeps per scanner the mean/std/count and the 10 s window medians, not the raw
+    samples. Readings are regenerated per scanner at the recorded rate (gaps of at least
+    `min_interval`, plus an exponential extra so the mean matches duration / n). The level follows
+    the window medians (windows replayed in a random order, so the slow drift is kept) plus
+    per-sample noise with the remaining spread. A scanner absent from a window stays silent then.
+    """
+
+    def __init__(self, spot: dict, rng: random.Random, min_interval: float = MIN_INTERVAL_S) -> None:
+        self.rng = rng
+        self.window = fc.WINDOW_S
+        order = spot.get("window_scanners", [])
+        rows = spot.get("windows", [])
+        self.rows = [{s: v for s, v in zip(order, row, strict=False) if v is not None} for row in rows]
+        duration = float(spot.get("duration_s", 60))
+        self.scanners: dict[str, tuple[float, float]] = {}  # scanner -> (mean extra gap, noise sd)
+        for s, st in spot.get("scanners", {}).items():
+            meds = [r[s] for r in self.rows if s in r]
+            if not meds:
+                continue
+            mean_m = sum(meds) / len(meds)
+            var_w = sum((m - mean_m) ** 2 for m in meds) / len(meds)
+            sd = max(1.0, (max(0.0, float(st.get("std", 3.0)) ** 2 - var_w)) ** 0.5)
+            gap = max(min_interval, duration / max(1, int(st.get("n", 1))))
+            self.scanners[s] = (gap - min_interval, sd)
+        self.min_interval = min_interval
+
+    def readings(self, start: float, end: float) -> dict[str, list[tuple[float, float]]]:
+        """Readings with stamps in [start, end)."""
+        rng = self.rng
+        n_win = max(1, math.ceil((end - start) / self.window))
+        seq: list[dict[str, float]] = []
+        while len(seq) < n_win:
+            block = list(self.rows)
+            rng.shuffle(block)
+            seq.extend(block)
+        out: dict[str, list[tuple[float, float]]] = {}
+        for s, (extra, sd) in self.scanners.items():
+            t = start + rng.random() * (self.min_interval + extra)
+            while t < end:
+                level = seq[int((t - start) // self.window)].get(s)
+                if level is not None:
+                    out.setdefault(s, []).append((t, float(round(level + rng.gauss(0.0, sd)))))
+                t += self.min_interval + (rng.expovariate(1.0 / extra) if extra > 0 else 0.0)
+        return out
+
+
+def _merge(*parts: dict[str, list[tuple[float, float]]]) -> dict[str, list[tuple[float, float]]]:
+    out: dict[str, list[tuple[float, float]]] = {}
+    for part in parts:
+        for s, items in part.items():
+            out.setdefault(s, []).extend(items)
+    for items in out.values():
+        items.sort()
+    return out
+
+
+def _posteriors(matcher, readings, scanner_room, offsets, times, window):
+    """Per cycle: (posterior or None, reason, nearest-proxy room)."""
+    out = []
+    for t in times:
+        live = fc.live_vector({s: [x for x in v if x[0] <= t] for s, v in readings.items()}, t, window)
+        res = matcher.match(live) if live else None
+        base = fc.nearest_proxy_room(live, scanner_room, offsets)
+        if res is None:
+            out.append((None, fc.REASON_NO_DATA, base))
+        elif res.outlier:
+            out.append((None, fc.REASON_OUTLIER, base))
+        else:
+            out.append((res.posterior, fc.REASON_MATCH, base))
+    return out
+
+
+def _shown(seq, times, smoother_kwargs):
+    sm = fc.RoomSmoother(**smoother_kwargs)
+    shown = []
+    for (post, reason, base), t in zip(seq, times, strict=True):
+        out = sm.update(post, t, reason=reason)
+        shown.append(out.room if out.room is not None else base)
+    return shown
+
+
+def build_scenarios(
+    spots: list[dict],
+    rooms: tuple[str, str] | None,
+    *,
+    seeds: int = 4,
+    pre_s: float = 40.0,
+    post_s: float = 60.0,
+    steady_s: float = 300.0,
+    min_interval: float = MIN_INTERVAL_S,
+) -> dict:
+    """
+    Raw reading scenarios (independent of the settings, so every setting sees the same data).
+
+    - transitions: for every ordered pair of spots in different rooms (restricted to `rooms` if
+      given), `pre_s` seconds at spot A then `post_s` at spot B, the switch at t = 0.
+    - steady: every spot (in `rooms`) for `steady_s` seconds.
+    The matcher for a scenario is trained on all spots except the replayed ones (leave-out).
+    """
+    sel = [s for s in spots if rooms is None or s["room"] in rooms]
+    trans, steady = [], []
+    for seed in range(seeds):
+        for a in sel:
+            for b in sel:
+                if a["room"] == b["room"]:
+                    continue
+                rng = random.Random(f"{seed}/{a['id']}/{b['id']}")
+                ra = SpotSampler(a, rng, min_interval).readings(-pre_s - 30.0, 0.0)
+                rb = SpotSampler(b, rng, min_interval).readings(0.0, post_s)
+                trans.append((a, b, _merge(ra, rb), rng.random() * CYCLE_S))
+        for a in sel:
+            rng = random.Random(f"{seed}/{a['id']}/steady")
+            steady.append((a, SpotSampler(a, rng, min_interval).readings(-30.0, steady_s), rng.random() * CYCLE_S))
+    return {"transitions": trans, "steady": steady, "pre_s": pre_s, "post_s": post_s, "steady_s": steady_s}
+
+
+def precompute(
+    scenarios: dict, spots: list[dict], scanner_room, offsets, window: float, leave_out: bool = True, **matcher_kwargs
+) -> dict:
+    """
+    Posterior sequences for one live window (the expensive part); reused for all smoother settings.
+
+    With `leave_out` (default) the replayed spots are not in the matcher (pessimistic: a position
+    between recorded spots); without it all spots are (optimistic: the phone at a recorded spot).
+    """
+    cache: dict[frozenset, object] = {}
+
+    def matcher_without(*ids):
+        key = frozenset(ids) if leave_out else frozenset()
+        if key not in cache:
+            cache[key] = fc.Matcher([s for s in spots if s["id"] not in key], **matcher_kwargs)
+        return cache[key]
+
+    pre, post, steady_s = scenarios["pre_s"], scenarios["post_s"], scenarios["steady_s"]
+    trans = []
+    for a, b, readings, phase in scenarios["transitions"]:
+        times = [t * CYCLE_S + phase - pre for t in range(int((pre + post) / CYCLE_S))]
+        matcher = matcher_without(a["id"], b["id"])
+        trans.append((a, b, times, _posteriors(matcher, readings, scanner_room, offsets, times, window)))
+    steady = []
+    for a, readings, phase in scenarios["steady"]:
+        times = [t * CYCLE_S + phase for t in range(int(steady_s / CYCLE_S))]
+        matcher = matcher_without(a["id"])
+        steady.append((a, times, _posteriors(matcher, readings, scanner_room, offsets, times, window)))
+    return {"transitions": trans, "steady": steady}
+
+
+def _switch_stats(runs, smoother_kwargs) -> dict:
+    first, settled, missed = [], [], 0
+    for _a, b, times, seq in runs:
+        shown = _shown(seq, times, smoother_kwargs)
+        after = [(t, r) for t, r in zip(times, shown, strict=True) if t >= 0]
+        hit = next((t for t, r in after if r == b["room"]), None)
+        if hit is None:
+            missed += 1
+            continue
+        first.append(hit)
+        last_wrong = max((t for t, r in after if r != b["room"]), default=None)
+        settled.append(0.0 if last_wrong is None else last_wrong + CYCLE_S)
+    n = len(runs)
+    return {
+        "switch_median": fc.median(first) if first else None,
+        "switch_p90": fc._percentile(first, 0.9),
+        "settled_median": fc.median(settled) if settled else None,
+        "settled_p90": fc._percentile(settled, 0.9),
+        "missed": round(missed / n, 3) if n else None,
+    }
+
+
+def _steady_stats(runs, smoother_kwargs, warmup_s) -> dict:
+    changes = minutes = wrong = cycles = 0.0
+    for a, times, seq in runs:
+        shown = _shown(seq, times, smoother_kwargs)
+        kept = [r for t, r in zip(times, shown, strict=True) if t >= warmup_s]
+        changes += sum(1 for x, y in zip(kept, kept[1:], strict=False) if x != y)
+        minutes += len(kept) * CYCLE_S / 60.0
+        wrong += sum(1 for r in kept if r != a["room"])
+        cycles += len(kept)
+    return {
+        "flicker_per_min": round(changes / minutes, 3) if minutes else None,
+        "wrong": round(wrong / cycles, 3) if cycles else None,
+    }
+
+
+def latency_flicker(pre: dict, smoother_kwargs: dict, warmup_s: float = 20.0) -> dict:
+    """
+    Switching time and flicker for one smoother setting.
+
+    - switch: seconds from the move until the shown room first equals B (median, p90), and
+      `settled`: until it stays B for the rest of the run; `missed` = share that never showed B.
+    - flicker: changes of the shown room per minute while the phone stays at one spot (after
+      `warmup_s`), and the share of time a wrong room is shown (`wrong`).
+    `by_pair` / `by_room` give the same per direction and per room.
+    """
+    out = {
+        **_switch_stats(pre["transitions"], smoother_kwargs),
+        **_steady_stats(pre["steady"], smoother_kwargs, warmup_s),
+    }
+    pairs: dict[str, list] = {}
+    for run in pre["transitions"]:
+        pairs.setdefault(f"{run[0]['room']}->{run[1]['room']}", []).append(run)
+    rooms: dict[str, list] = {}
+    for run in pre["steady"]:
+        rooms.setdefault(run[0]["room"], []).append(run)
+    out["by_pair"] = {k: _switch_stats(v, smoother_kwargs) for k, v in sorted(pairs.items())}
+    out["by_room"] = {k: _steady_stats(v, smoother_kwargs, warmup_s) for k, v in sorted(rooms.items())}
+    return out
+
+
+def latency_grid() -> list[tuple[str, float, dict]]:
+    """(name, live window, smoother kwargs) for --latency."""
+    out = []
+    for name, p in fc.FP_PRESETS.items():
+        out.append((f"preset {name}", p["live_window"], fc.smoother_kwargs(p)))
+    out.append(("fp4 (12 s, tau 6, 3 cyc, dwell 5)", 12.0, {"tau": 6.0, "confirm_cycles": 3, "min_dwell": 5.0}))
+    for window in (6.0, 8.0, 10.0, 12.0):
+        for tau in (1.0, 2.0, 3.0, 4.0, 6.0):
+            for confirm in (1, 2, 3):
+                for dwell in (0.0, 3.0, 5.0, 10.0):
+                    out.append(
+                        (
+                            f"w{window:g} tau{tau:g} c{confirm} d{dwell:g}",
+                            window,
+                            {"tau": tau, "confirm_cycles": confirm, "min_dwell": dwell},
+                        )
+                    )
+    return out
+
+
+def run_latency(spots, scanner_room, offsets, rooms, args, matcher_kwargs) -> list[dict]:
+    scen = build_scenarios(spots, rooms, seeds=args.seeds, min_interval=args.min_interval)
+    print(
+        f"latency: {len(scen['transitions'])} transitions, {len(scen['steady'])} steady runs "
+        f"({scen['steady_s']:.0f} s), readings >= {args.min_interval} s apart, "
+        + ("in-sample (all spots in the matcher)" if args.in_sample else "replayed spots left out of the matcher")
+    )
+    print(
+        f"{'setting':36} {'sw.med':>6} {'sw.p90':>6} {'set.med':>7} {'set.p90':>7}"
+        f" {'miss':>5} {'flick/min':>9} {'wrong':>5}"
+    )
+    pre_cache: dict[float, dict] = {}
+    out = []
+    for name, window, skw in latency_grid():
+        if args.only and args.only not in name:
+            continue
+        if window not in pre_cache:
+            pre_cache[window] = precompute(
+                scen, spots, scanner_room, offsets, window, leave_out=not args.in_sample, **matcher_kwargs
+            )
+        skw = {"min_confidence": args.min_confidence, **skw}
+        r = latency_flicker(pre_cache[window], skw)
+
+        def f(v):
+            return f"{v:6.1f}" if v is not None else "   n/a"
+
+        print(
+            f"{name:36} {f(r['switch_median'])} {f(r['switch_p90'])}  {f(r['settled_median'])}  {f(r['settled_p90'])}"
+            f" {r['missed']:5.2f} {r['flicker_per_min']:9.3f} {r['wrong']:5.3f}"
+        )
+        if args.detail:
+            for k, v in r["by_pair"].items():
+                print(
+                    f"    {k:30} first {f(v['switch_median'])} p90 {f(v['switch_p90'])}"
+                    f"  settled {f(v['settled_median'])} p90 {f(v['settled_p90'])} miss {v['missed']:.2f}"
+                )
+            for k, v in r["by_room"].items():
+                print(f"    steady {k:23} flicker/min {v['flicker_per_min']:.3f} wrong {v['wrong']:.3f}")
+        out.append({"name": name, "live_window": window, "smoother": skw, **r})
+    return out
+
+
 def variants() -> list[tuple[str, dict]]:
     """(name, Matcher kwargs). Edit freely; the first one is the fp3 behaviour."""
     out: list[tuple[str, dict]] = [("DEFAULTS (fp4)", {})]
@@ -216,6 +508,16 @@ def main() -> int:
     ap.add_argument("--outlier-db", type=float, help="override outlier_db for all variants")
     ap.add_argument("--stress", action="store_true", help="also run live-like perturbation tests")
     ap.add_argument("--no-smooth", action="store_true", help="skip the (slower) smoothed evaluation")
+    ap.add_argument(
+        "--latency", action="store_true", help="simulate room switching time and flicker for smoother settings"
+    )
+    ap.add_argument("--rooms", nargs=2, metavar=("A", "B"), help="--latency: only transitions between these rooms")
+    ap.add_argument("--in-sample", action="store_true", help="--latency: keep the replayed spots in the matcher")
+    ap.add_argument("--detail", action="store_true", help="--latency: per direction and per room")
+    ap.add_argument("--seeds", type=int, default=4, help="--latency: repetitions per scenario")
+    ap.add_argument(
+        "--min-interval", type=float, default=MIN_INTERVAL_S, help="--latency: minimum seconds between readings"
+    )
     args = ap.parse_args()
 
     spots, scanner_room, offsets = load(args.storage)
@@ -231,6 +533,13 @@ def main() -> int:
         big, small = sorted(rooms, key=rooms.get, reverse=True)
         pair = (big, small)
     print(f"{len(spots)} spots: {rooms}; {len(scanner_room)} scanners with an area")
+
+    if args.latency:
+        lat_rooms = tuple(args.rooms) if args.rooms else None
+        results = run_latency(spots, scanner_room, offsets, lat_rooms, args, {})
+        if args.json:
+            args.json.write_text(json.dumps(results, indent=1))
+        return 0
 
     results = []
     header = f"{'variant':38} {'acc':>5} {'bal':>5} {'conf':>5} {'logl':>5} {'outl':>5} {'d95':>5} {'s.acc':>5} {'s.bal':>5} {'e.acc':>5} {'e.bal':>5} {'dmax':>5}"

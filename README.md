@@ -27,18 +27,28 @@ live signal pattern against those recordings.
 - **Validate**: `bermuda.evaluate_fingerprints` returns leave-one-spot-out accuracy on the recorded 10 s windows,
   balanced accuracy (mean per-room recall), log-loss and confidence, next to the nearest-proxy baseline, plus a
   confusion matrix and the worst spots. Offline: `python3 -I scripts/fingerprint_eval.py --storage /config/.storage`
-  compares matcher variants, smoothing and live-like perturbations (fewer/more scanners, level shifts).
+  compares matcher variants, smoothing and live-like perturbations (fewer/more scanners, level shifts);
+  `--latency` simulates room changes (switching time, flicker) for the switching presets and a settings grid.
 - **Matcher** (default `knn`): per spot the RMS difference in dB between the live vector and the spot means, over
   the same set of scanners for every spot (a scanner not heard counts as -100 dBm), so a spot that lists many weak
   scanners gains nothing from that. A room's score is a count-normalised mixture over its spots (a room with more
   spots does not win by count); softmax posterior (T 0.3). No device offset by default: between adjacent rooms the
   absolute level is often the only difference. If even the nearest spot is more than 10 dB away (a room without
-  spots) the result is an outlier and falls back to nearest-proxy. Smoothing: EMA (~6 s), hysteresis (+0.15 for 3
-  cycles, or >=0.85) and 5 s minimum dwell; below 0.5 confidence, with fewer than 3 common proxies, as an outlier or
-  without data it falls back to Bermuda's own nearest-proxy area. The fp1-fp3 naive Bayes (`bayes`) is still
-  available.
+  spots) the result is an outlier and falls back to nearest-proxy. Live vector: per proxy the median over the
+  last 8 s. Smoothing: EMA (tau 3 s), hysteresis (+0.15 for 2 cycles, or >=0.85) and 3 s minimum dwell; below 0.5
+  confidence, with fewer than 3 common proxies, as an outlier or without data it falls back to Bermuda's own
+  nearest-proxy area. The fp1-fp3 naive Bayes (`bayes`) is still available.
+- **Room switching speed** (preset): `fast` (6 s window, tau 2 s, 1 cycle, 3 s dwell; switches in ~5 s),
+  `balanced` (default: 8 s, 3 s, 2 cycles, 3 s; ~8 s), `stable` (12 s, 6 s, 3 cycles, 5 s; ~13 s, the fp4
+  behaviour) or `custom` (the four values set individually). Shelly proxies forward at most one reading per
+  device about every 3.1 s, also when the phone advertises at 10 Hz, so a window shorter than ~6 s holds only
+  one or two readings. Simulated on real bedroom / walk-in closet recordings
+  (`scripts/fingerprint_eval.py --latency`): balanced halves the switching time of fp4 for about twice the
+  flicker (0.3 -> 0.6 room changes per minute standing still, in-sample) with the same time in a wrong room.
 - **Options** (Bermuda options -> Global options): fingerprint matcher (`knn` / `bayes`), device offset cap
-  (dB, 0 = off, default 0), outlier distance (dB, 0 = off, default 10), minimum confidence (default 0.5).
+  (dB, 0 = off, default 0), outlier distance (dB, 0 = off, default 10), minimum confidence (default 0.5),
+  room switching preset (default `balanced`) and, for `custom`, live window (3-30 s), smoothing tau (0-30 s),
+  confirm cycles (1-10) and minimum dwell (0-60 s).
 - **Mode** (Bermuda options → Global options → Fingerprint mode):
   - `shadow` (default): adds a *Fingerprint room* sensor per tracked device; Bermuda's Area/Floor are unchanged.
   - `override`: Area and Floor follow the fingerprint room when it is confident and mapped to an HA area.
@@ -51,7 +61,7 @@ live signal pattern against those recordings.
 - **Event**: `bermuda_fingerprint_recorded` when a recording ends (for a notification or TTS).
 - **Storage**: `.storage/bermuda.fingerprints` (raw RSSI, so changing RSSI offsets does not invalidate spots).
 - The maths is in `fingerprint_core.py` (pure Python, no HA imports). Tests:
-  `python3 -I -m unittest discover -s tests -p "test_fingerprint_core.py"`.
+  `python3 -I -m unittest discover -s tests -p "test_fingerprint_*.py"`.
 
 ### Dashboard card
 

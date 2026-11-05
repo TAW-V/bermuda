@@ -100,8 +100,13 @@ class TestHelpers(unittest.TestCase):
             "s2": [(99.0, -127)],  # invalid only
             "s3": [(80.0, -60)],  # stale only
         }
-        vec = fc.live_vector(readings, nowstamp=100.0)
+        vec = fc.live_vector(readings, nowstamp=100.0, window=12.0)
         self.assertEqual(vec, {"s1": -65.0})
+
+    def test_live_vector_short_window(self):
+        readings = {"s1": [(100.0, -70), (97.0, -60), (93.0, -50)]}
+        self.assertEqual(fc.live_vector(readings, nowstamp=100.0, window=6.0), {"s1": -65.0})
+        self.assertEqual(fc.live_vector(readings, nowstamp=100.0, window=2.5), {"s1": -70.0})
 
 
 class TestRecorder(unittest.TestCase):
@@ -332,7 +337,8 @@ class TestAdjacentRooms(unittest.TestCase):
 
 class TestSmoother(unittest.TestCase):
     def test_first_result_and_hysteresis(self):
-        sm = fc.RoomSmoother(tau=0.001)  # tau ~0: EMA follows input, isolates the switch logic
+        # tau ~0: EMA follows input, isolates the switch logic
+        sm = fc.RoomSmoother(tau=0.001, confirm_cycles=3)
         r = sm.update({"a": 0.7, "b": 0.3}, 0.0)
         self.assertEqual((r.room, r.reason), ("a", fc.REASON_MATCH))
         # b leads by 0.2 (>= margin) but below instant threshold: needs 3 cycles
@@ -382,6 +388,75 @@ class TestSmoother(unittest.TestCase):
         self.assertEqual(sm.incumbent, "a")  # kept for a short gap
         sm.update(None, 40.0)
         self.assertIsNone(sm.incumbent)
+
+
+    def test_confirm_cycles_one_switches_on_first_lead(self):
+        sm = fc.RoomSmoother(tau=0.001, confirm_cycles=1, min_dwell=0)
+        sm.update({"a": 0.7, "b": 0.3}, 0.0)
+        r = sm.update({"a": 0.4, "b": 0.6}, 1.0)
+        self.assertEqual(r.room, "b")
+
+    def test_defaults_follow_balanced_preset(self):
+        sm = fc.RoomSmoother()
+        p = fc.FP_PRESETS[fc.DEFAULT_PRESET]
+        self.assertEqual(fc.DEFAULT_PRESET, fc.PRESET_BALANCED)
+        self.assertEqual((sm.tau, sm.confirm_cycles, sm.min_dwell), (p["tau"], p["confirm_cycles"], p["min_dwell"]))
+        self.assertEqual(fc.LIVE_WINDOW_S, p["live_window"])
+
+    def test_smaller_tau_switches_sooner(self):
+        def switch_time(**kw):
+            sm = fc.RoomSmoother(margin=0.15, **kw)
+            t = 0.0
+            for _ in range(20):
+                sm.update({"a": 0.95, "b": 0.05}, t)
+                t += 1.05
+            t0 = t
+            while t < t0 + 60:
+                if sm.update({"a": 0.2, "b": 0.8}, t).room == "b":
+                    return t - t0
+                t += 1.05
+            return None
+
+        fast = switch_time(**fc.smoother_kwargs(fc.FP_PRESETS[fc.PRESET_FAST]))
+        balanced = switch_time(**fc.smoother_kwargs(fc.FP_PRESETS[fc.PRESET_BALANCED]))
+        stable = switch_time(**fc.smoother_kwargs(fc.FP_PRESETS[fc.PRESET_STABLE]))
+        self.assertLess(fast, balanced)
+        self.assertLess(balanced, stable)
+        self.assertLess(balanced, 8.0)
+
+
+class TestSwitchingSettings(unittest.TestCase):
+    def test_presets_are_ordered(self):
+        self.assertEqual(fc.PRESETS[-1], fc.PRESET_CUSTOM)
+        f, b, s = (fc.FP_PRESETS[k] for k in (fc.PRESET_FAST, fc.PRESET_BALANCED, fc.PRESET_STABLE))
+        for key in ("live_window", "tau"):
+            self.assertLessEqual(f[key], b[key])
+            self.assertLessEqual(b[key], s[key])
+
+    def test_resolve_preset_ignores_custom_values(self):
+        out = fc.resolve_switching(fc.PRESET_FAST, {"live_window": 25, "tau": 20})
+        self.assertEqual(out, fc.FP_PRESETS[fc.PRESET_FAST])
+        out["tau"] = 99  # a copy, the preset table is not changed
+        self.assertNotEqual(fc.FP_PRESETS[fc.PRESET_FAST]["tau"], 99)
+
+    def test_resolve_custom_clamps_and_defaults(self):
+        out = fc.resolve_switching(
+            fc.PRESET_CUSTOM, {"live_window": 1, "tau": "bad", "confirm_cycles": 2.6, "min_dwell": 999}
+        )
+        base = fc.FP_PRESETS[fc.DEFAULT_PRESET]
+        self.assertEqual(out["live_window"], fc.LIVE_WINDOW_RANGE[0])
+        self.assertEqual(out["tau"], base["tau"])
+        self.assertEqual(out["confirm_cycles"], 3)
+        self.assertIsInstance(out["confirm_cycles"], int)
+        self.assertEqual(out["min_dwell"], fc.MIN_DWELL_RANGE[1])
+        self.assertEqual(fc.resolve_switching(None), base)  # unknown / missing: default values
+        self.assertEqual(fc.resolve_switching("nonsense", {}), base)
+
+    def test_smoother_kwargs(self):
+        kw = fc.smoother_kwargs({"live_window": 6, "tau": 2, "confirm_cycles": 1, "min_dwell": 3})
+        self.assertEqual(kw, {"tau": 2.0, "confirm_cycles": 1, "min_dwell": 3.0})
+        sm = fc.RoomSmoother(**kw, min_confidence=0.4)
+        self.assertEqual(sm.min_confidence, 0.4)
 
 
 class TestEvaluate(unittest.TestCase):

@@ -43,7 +43,12 @@
           "fingerprint_method": "Fingerprint matcher",
           "fingerprint_offset_max": "Fingerprint device offset cap (dB)",
           "fingerprint_outlier_db": "Fingerprint outlier distance (dB)",
-          "fingerprint_min_confidence": "Fingerprint minimum confidence"
+          "fingerprint_min_confidence": "Fingerprint minimum confidence",
+          "fingerprint_preset": "Fingerprint room switching",
+          "fingerprint_live_window": "Fingerprint live window (s, custom)",
+          "fingerprint_smoothing_tau": "Fingerprint smoothing time constant (s, custom)",
+          "fingerprint_confirm_cycles": "Fingerprint confirm cycles (custom)",
+          "fingerprint_min_dwell": "Fingerprint minimum dwell (s, custom)"
         },
         "data_description": {
           "max_area_radius": "In the simple `AREA` feature, a device will be marked as being in the AREA of it's closest receiver, if inside this radius. If you set it small, devices will go to `unknown` between receivers, but if large devices will always appear as in their closest Area.",
@@ -57,7 +62,12 @@
           "fingerprint_method": "`knn` (default): compares absolute RSSI levels with every recorded spot; robust when more or fewer far scanners are heard. `bayes`: naive Bayes with a heard/not-heard term; can be sharper but leans on how many weak scanners are heard.",
           "fingerprint_offset_max": "Estimate a per-device level offset (phone in a pocket, another transmitter) up to this many dB. 0 (default) disables it: between adjacent rooms the absolute level is often the only difference.",
           "fingerprint_outlier_db": "If even the nearest recorded spot is farther than this (RMS dB over the heard scanners), the position is not covered by any spot and Bermuda's nearest-proxy area is used. Default 10. 0 disables the check.",
-          "fingerprint_min_confidence": "Below this smoothed room probability the nearest-proxy area is used. Default 0.5."
+          "fingerprint_min_confidence": "Below this smoothed room probability the nearest-proxy area is used. Default 0.5.",
+          "fingerprint_preset": "How fast the fingerprint room follows a move. `fast`: about 5 s, more flicker. `balanced` (default): about 8 s. `stable`: about 13 s, least flicker (the fp4 behaviour). `custom`: use the four values below. The values below are ignored unless this is `custom`.",
+          "fingerprint_live_window": "Seconds of readings per scanner whose median forms the live vector (3-30). The Shelly proxies report about every 3 s per scanner, so 6-12 s holds 2-4 readings. Shorter reacts faster but is noisier. fast 6, balanced 8, stable 12.",
+          "fingerprint_smoothing_tau": "Time constant of the exponential smoothing of the room probabilities (0-30 s, 0 = none). The main speed/flicker trade-off. fast 2, balanced 3, stable 6.",
+          "fingerprint_confirm_cycles": "Update cycles (about 1 s each) a new room must lead by a margin before it is shown (1-10). A very confident new room switches at once. fast 1, balanced 2, stable 3.",
+          "fingerprint_min_dwell": "Minimum seconds between two room switches (0-60). fast 3, balanced 3, stable 5."
         }
       },
       "selectdevices": {
@@ -268,6 +278,14 @@
       "options": {
         "knn": "kNN on spot levels (default)",
         "bayes": "Naive Bayes (fp3)"
+      }
+    },
+    "fingerprint_preset": {
+      "options": {
+        "fast": "Fast (~5 s)",
+        "balanced": "Balanced (~8 s, default)",
+        "stable": "Stable (~13 s)",
+        "custom": "Custom (values below)"
       }
     }
   }
