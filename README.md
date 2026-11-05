@@ -45,19 +45,27 @@ live signal pattern against those recordings.
 - The maths is in `fingerprint_core.py` (pure Python, no HA imports). Tests:
   `python3 -I -m unittest discover -s tests -p "test_fingerprint_core.py"`.
 
-Example dashboard button that records a new spot in the living room:
+### Dashboard card
+
+The fork ships a Lovelace card, `custom:bermuda-fingerprint-card`. The integration serves it and loads it
+automatically, so there is no resource to add. Add it from the card picker ("Bermuda fingerprint card") or in YAML:
 
 ```yaml
-type: button
-name: "+ new spot"
-icon: mdi:fingerprint
-tap_action:
-  action: perform-action
-  perform_action: bermuda.record_fingerprint
-  data:
-    area_id: living_room
-    duration: 60
+type: custom:bermuda-fingerprint-card
+# all optional:
+device: sensor.my_phone_fingerprint_room  # any Bermuda entity of the device; auto when there is only one
+duration: 60                              # recording seconds (30-600)
+show_areas_without_spots: true
+exclude_areas: [garage]
+title: Fingerprints
 ```
+
+It shows every area grouped by floor, with its spot count (grey: none, orange: 1-4, green: 5 or more) and a
+**+ spot** button that starts a recording for that area. A live progress bar with a Stop button appears while
+recording. Tap an area to list its spots, with re-record and delete (tap twice to confirm) and "delete all". The
+top of the card shows the fingerprint room next to Bermuda's nearest-proxy area. The card follows the HA theme and
+language (English and Dutch included) and has a visual editor.
+
 
 
 [![GitHub Release][releases-shield]][releases]

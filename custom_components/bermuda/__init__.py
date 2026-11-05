@@ -17,6 +17,7 @@ from homeassistant.helpers.entity_registry import async_migrate_entries
 
 from .const import _LOGGER, DOMAIN, PLATFORMS, STARTUP_MESSAGE
 from .coordinator import BermudaDataUpdateCoordinator
+from .fingerprint_frontend import async_register_frontend  # TAW-V fingerprint
 from .util import mac_math_offset, mac_norm
 
 if TYPE_CHECKING:
@@ -56,6 +57,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: BermudaConfigEntry) -> b
     if not coordinator.last_update_success:
         await on_failure()
 
+    await async_register_frontend(hass)  # TAW-V fingerprint: serve custom:bermuda-fingerprint-card
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
