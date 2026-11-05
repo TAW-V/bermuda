@@ -17,9 +17,11 @@ mean confidence of the posterior, the outlier share, and a smoothed accuracy
 (RoomSmoother over the held-out windows, with fallback to nearest-proxy).
 ``--confusion A B`` adds the A -> B confusion count.
 
-``--latency`` replays room changes instead: synthetic raw readings regenerated from the stored
-spots at the measured Shelly rate (one reading per scanner every >= 3.1 s), spot A then spot B
-of another room, fed through live_vector + Matcher + RoomSmoother every 1.05 s. It reports the
+``--latency`` replays room changes instead: the recorded raw readings of spot A then spot B of
+another room (from ``.storage/bermuda_fingerprints_raw/<spot_id>.json``, fp6+, looped from a
+random phase when the run is longer than the recording), or, for a spot without a raw file or
+with ``--no-raw``, synthetic readings regenerated from the stored summaries at the measured
+Shelly rate (one reading per scanner every >= 3.1 s), fed through live_vector + Matcher + RoomSmoother every 1.05 s. It reports the
 time until the shown room switches (median / p90), until it stays switched, and the flicker
 (room changes per minute, share of time in a wrong room) while standing still at one spot, for
 the presets and a grid of live window / tau / confirm cycles / dwell. ``--in-sample`` keeps the
@@ -67,6 +69,28 @@ def load(storage: Path) -> tuple[list[dict], dict[str, str], dict[str, float]]:
             if entry.get("domain") == "bermuda":
                 offsets = dict(entry.get("options", {}).get("rssi_offsets", {}))
     return spots, scanner_room, offsets
+
+
+RAW_DIR_NAME = "bermuda_fingerprints_raw"
+
+
+def load_raw(storage: Path, spots: list[dict]) -> dict[str, dict[str, list[tuple[float, float]]]]:
+    """spot id -> per scanner (t, rssi) raw readings, for the spots that have a readable raw file."""
+    out = {}
+    raw_dir = storage / RAW_DIR_NAME
+    for spot in spots:
+        name = (spot.get("raw") or {}).get("file") or fc.raw_file_name(spot["id"])
+        path = raw_dir / Path(name).name
+        if not path.exists():
+            continue
+        try:
+            readings = fc.raw_readings(fc.read_raw_file(path))
+        except (OSError, ValueError) as err:
+            print(f"skipping raw file {path}: {err}", file=sys.stderr)
+            continue
+        if readings:
+            out[spot["id"]] = readings
+    return out
 
 
 def smoothed_accuracy(
@@ -215,6 +239,42 @@ class SpotSampler:
         return out
 
 
+class RawSampler:
+    """
+    The recorded raw readings of one spot, replayed on the simulation clock.
+
+    Same interface as SpotSampler. The recording (length `duration`) is looped from a random phase,
+    so runs longer than the recording and different seeds see different stretches of it.
+    """
+
+    def __init__(self, readings: dict[str, list[tuple[float, float]]], duration: float, rng: random.Random) -> None:
+        self.items = sorted((t, s, r) for s, v in readings.items() for t, r in v)
+        last = self.items[-1][0] if self.items else 0.0
+        self.duration = max(float(duration), last + 1e-3, 1.0)
+        self.phase = rng.random() * self.duration
+
+    def readings(self, start: float, end: float) -> dict[str, list[tuple[float, float]]]:
+        """Readings with stamps in [start, end)."""
+        out: dict[str, list[tuple[float, float]]] = {}
+        base = start - self.phase
+        while base < end:
+            for t, s, r in self.items:
+                stamp = base + t
+                if start <= stamp < end:
+                    out.setdefault(s, []).append((stamp, r))
+            base += self.duration
+        for v in out.values():
+            v.sort()
+        return out
+
+
+def make_sampler(spot: dict, rng: random.Random, min_interval: float, raw: dict | None):
+    """RawSampler if the spot has raw readings in `raw`, else the synthetic SpotSampler."""
+    if raw and spot["id"] in raw:
+        return RawSampler(raw[spot["id"]], float(spot.get("duration_s", 60)), rng)
+    return SpotSampler(spot, rng, min_interval)
+
+
 def _merge(*parts: dict[str, list[tuple[float, float]]]) -> dict[str, list[tuple[float, float]]]:
     out: dict[str, list[tuple[float, float]]] = {}
     for part in parts:
@@ -259,6 +319,7 @@ def build_scenarios(
     post_s: float = 60.0,
     steady_s: float = 300.0,
     min_interval: float = MIN_INTERVAL_S,
+    raw: dict | None = None,
 ) -> dict:
     """
     Raw reading scenarios (independent of the settings, so every setting sees the same data).
@@ -267,6 +328,8 @@ def build_scenarios(
       given), `pre_s` seconds at spot A then `post_s` at spot B, the switch at t = 0.
     - steady: every spot (in `rooms`) for `steady_s` seconds.
     The matcher for a scenario is trained on all spots except the replayed ones (leave-out).
+    Spots with raw readings in `raw` (spot id -> per scanner (t, rssi), see load_raw) replay them;
+    the others use synthetic readings from the summaries.
     """
     sel = [s for s in spots if rooms is None or s["room"] in rooms]
     trans, steady = [], []
@@ -276,13 +339,23 @@ def build_scenarios(
                 if a["room"] == b["room"]:
                     continue
                 rng = random.Random(f"{seed}/{a['id']}/{b['id']}")
-                ra = SpotSampler(a, rng, min_interval).readings(-pre_s - 30.0, 0.0)
-                rb = SpotSampler(b, rng, min_interval).readings(0.0, post_s)
+                ra = make_sampler(a, rng, min_interval, raw).readings(-pre_s - 30.0, 0.0)
+                rb = make_sampler(b, rng, min_interval, raw).readings(0.0, post_s)
                 trans.append((a, b, _merge(ra, rb), rng.random() * CYCLE_S))
         for a in sel:
             rng = random.Random(f"{seed}/{a['id']}/steady")
-            steady.append((a, SpotSampler(a, rng, min_interval).readings(-30.0, steady_s), rng.random() * CYCLE_S))
-    return {"transitions": trans, "steady": steady, "pre_s": pre_s, "post_s": post_s, "steady_s": steady_s}
+            sampler = make_sampler(a, rng, min_interval, raw)
+            steady.append((a, sampler.readings(-30.0, steady_s), rng.random() * CYCLE_S))
+    n_raw = sum(1 for a in sel if raw and a["id"] in raw)
+    return {
+        "transitions": trans,
+        "steady": steady,
+        "pre_s": pre_s,
+        "post_s": post_s,
+        "steady_s": steady_s,
+        "raw_spots": n_raw,
+        "synthetic_spots": len(sel) - n_raw,
+    }
 
 
 def precompute(
@@ -398,11 +471,12 @@ def latency_grid() -> list[tuple[str, float, dict]]:
     return out
 
 
-def run_latency(spots, scanner_room, offsets, rooms, args, matcher_kwargs) -> list[dict]:
-    scen = build_scenarios(spots, rooms, seeds=args.seeds, min_interval=args.min_interval)
+def run_latency(spots, scanner_room, offsets, rooms, args, matcher_kwargs, raw=None) -> list[dict]:
+    scen = build_scenarios(spots, rooms, seeds=args.seeds, min_interval=args.min_interval, raw=raw)
     print(
         f"latency: {len(scen['transitions'])} transitions, {len(scen['steady'])} steady runs "
-        f"({scen['steady_s']:.0f} s), readings >= {args.min_interval} s apart, "
+        f"({scen['steady_s']:.0f} s); {scen['raw_spots']} spots replay recorded raw readings, "
+        f"{scen['synthetic_spots']} synthetic (>= {args.min_interval} s apart); "
         + ("in-sample (all spots in the matcher)" if args.in_sample else "replayed spots left out of the matcher")
     )
     print(
@@ -518,6 +592,9 @@ def main() -> int:
     ap.add_argument(
         "--min-interval", type=float, default=MIN_INTERVAL_S, help="--latency: minimum seconds between readings"
     )
+    ap.add_argument(
+        "--no-raw", action="store_true", help="--latency: ignore raw recording files, use synthetic readings"
+    )
     args = ap.parse_args()
 
     spots, scanner_room, offsets = load(args.storage)
@@ -536,7 +613,8 @@ def main() -> int:
 
     if args.latency:
         lat_rooms = tuple(args.rooms) if args.rooms else None
-        results = run_latency(spots, scanner_room, offsets, lat_rooms, args, {})
+        raw = {} if args.no_raw else load_raw(args.storage, spots)
+        results = run_latency(spots, scanner_room, offsets, lat_rooms, args, {}, raw=raw)
         if args.json:
             args.json.write_text(json.dumps(results, indent=1))
         return 0

@@ -58,6 +58,67 @@ class TestSampler(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+def raw_for(spot, seed=3, gap=3.1):
+    """Made-up raw readings for a spot: every scanner at its stored mean, one reading per `gap` s."""
+    rng = random.Random(seed)
+    out = {}
+    for scanner, st in spot["scanners"].items():
+        t = rng.random() * gap
+        while t < spot["duration_s"]:
+            out.setdefault(scanner, []).append((round(t, 3), float(round(st["mean"] + rng.gauss(0, 1)))))
+            t += gap
+    return out
+
+
+class TestRawReplay(unittest.TestCase):
+    def test_raw_sampler_loops_recording(self):
+        spot = two_rooms()[0]
+        raw = raw_for(spot)
+        sampler = fe.RawSampler(raw, spot["duration_s"], random.Random(2))
+        out = sampler.readings(-30.0, 150.0)  # longer than the 60 s recording
+        n_raw = sum(len(v) for v in raw.values())
+        n_out = sum(len(v) for v in out.values())
+        self.assertAlmostEqual(n_out, n_raw * 180 / 60, delta=len(raw) * 2)
+        recorded = {s: {r for _, r in v} for s, v in raw.items()}
+        for scanner, items in out.items():
+            stamps = [t for t, _ in items]
+            self.assertTrue(all(-30.0 <= t < 150.0 for t in stamps))
+            self.assertEqual(stamps, sorted(stamps))
+            self.assertTrue({r for _, r in items} <= recorded[scanner])  # only true readings
+
+    def test_load_raw_and_scenarios_use_it(self):
+        import json
+        import tempfile
+
+        spots = two_rooms()
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Path(tmp)
+            raw_dir = storage / fe.RAW_DIR_NAME
+            first = spots[0]
+            doc = {
+                "format": fc.RAW_FORMAT,
+                "version": fc.RAW_VERSION,
+                "spot_id": first["id"],
+                "columns": fc.RAW_COLUMNS,
+                "readings": [[t, s, None, r] for s, v in raw_for(first).items() for t, r in v],
+            }
+            fc.write_raw_file(raw_dir, fc.raw_file_name(first["id"]), doc)
+            (raw_dir / "broken.json").write_text("{")
+            spots[1]["raw"] = {"file": "broken.json", "samples": 1}
+            store = {"version": 1, "key": "bermuda.fingerprints", "data": {"spots": spots, "rooms": {}}}
+            (storage / "bermuda.fingerprints").write_text(json.dumps(store))
+            loaded, _scanner_room, _offsets = fe.load(storage)
+            raw = fe.load_raw(storage, loaded)
+        self.assertEqual(set(raw), {first["id"]})
+        scen = fe.build_scenarios(spots, None, seeds=1, steady_s=60.0, raw=raw)
+        self.assertEqual(scen["raw_spots"], 1)
+        self.assertEqual(scen["synthetic_spots"], len(spots) - 1)
+        steady = next(r for a, r, _p in scen["steady"] if a["id"] == first["id"])
+        recorded = {s: {x for _, x in v} for s, v in raw[first["id"]].items()}
+        for scanner, items in steady.items():
+            self.assertTrue({x for _, x in items} <= recorded[scanner])
+
+
 class TestLatency(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

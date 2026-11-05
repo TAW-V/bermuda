@@ -204,7 +204,7 @@
     },
     "clear_fingerprints": {
       "name": "Fingerprints wissen",
-      "description": "Verwijder alle locaties van één ruimte.",
+      "description": "Verwijder alle locaties van één ruimte, of met alle van elke ruimte. Hun ruwe opnamebestanden worden ook verwijderd.",
       "fields": {
         "area_id": {
           "name": "Ruimte",
@@ -213,12 +213,16 @@
         "room": {
           "name": "Ruimtenaam",
           "description": "Naam of label van de ruimte."
+        },
+        "all": {
+          "name": "Alle ruimtes",
+          "description": "Verwijder alle locaties van alle ruimtes (en alle ruwe opnamebestanden) in plaats van één ruimte."
         }
       }
     },
     "list_fingerprints": {
       "name": "Fingerprints tonen",
-      "description": "Geeft alle ruimtes en locaties terug (zonder ruwe vensters)."
+      "description": "Geeft alle ruimtes en locaties terug (zonder ruwe vensters). De ruwe metingen van elke opname staan in raw_dir (.storage/bermuda_fingerprints_raw/<spot_id>.json)."
     },
     "evaluate_fingerprints": {
       "name": "Fingerprints evalueren",

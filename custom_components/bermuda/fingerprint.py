@@ -2,7 +2,10 @@
 RSSI fingerprinting for Bermuda (TAW-V fork): Home Assistant glue.
 
 The maths lives in fingerprint_core.py (no HA imports). This module holds:
-- the persistent store (``.storage/bermuda.fingerprints``),
+- the persistent store (``.storage/bermuda.fingerprints``) with the spot summaries,
+- the raw readings of every recording, one JSON file per spot in
+  ``.storage/bermuda_fingerprints_raw/<spot_id>.json`` (written once when the recording
+  ends, in the executor; only for offline training / replay, never loaded for matching),
 - the services (record / cancel / delete / clear / list / evaluate / map_room),
 - the per-cycle update called from the coordinator after Bermuda's own
   nearest-proxy area selection: it feeds the active recording, matches every
@@ -61,10 +64,13 @@ from .fingerprint_core import (
     Matcher,
     RoomSmoother,
     SpotRecorder,
+    delete_raw_files,
     evaluate,
     live_vector,
+    raw_file_name,
     resolve_switching,
     smoother_kwargs,
+    write_raw_file,
 )
 
 if TYPE_CHECKING:
@@ -72,6 +78,7 @@ if TYPE_CHECKING:
     from .coordinator import BermudaDataUpdateCoordinator
 
 STORE_KEY = f"{DOMAIN}.fingerprints"
+RAW_DIR_NAME = f"{DOMAIN}_fingerprints_raw"  # in .storage, next to the store
 STORE_VERSION = 1
 SAVE_DELAY = 2
 
@@ -182,6 +189,8 @@ class FingerprintManager:
         self.status_version = 0
         self.states: dict[str, FingerprintState] = {}
         self._smoothers: dict[str, RoomSmoother] = {}
+        self.raw_dir: str = hass.config.path(".storage", RAW_DIR_NAME)
+        self._raw_lock = asyncio.Lock()  # raw file writes / deletes run in order
 
     @property
     def enabled(self) -> bool:
@@ -209,6 +218,18 @@ class FingerprintManager:
         self.spots_version += 1
         if save:
             self._store.async_delay_save(self._data_to_save, SAVE_DELAY)
+
+    def _raw_io(self, func: Any, *args: Any) -> None:
+        """Run blocking raw-file I/O in the executor, in call order, without blocking the caller."""
+
+        async def _run() -> None:
+            async with self._raw_lock:
+                try:
+                    await self.hass.async_add_executor_job(func, *args)
+                except OSError as err:
+                    _LOGGER.warning("Fingerprint raw file %s failed: %s", getattr(func, "__name__", func), err)
+
+        self.hass.async_create_task(_run(), "bermuda fingerprint raw file")
 
     # ------------------------------------------------------------------ helpers
     def room_area_id(self, room: str | None) -> str | None:
@@ -304,6 +325,8 @@ class FingerprintManager:
             "samples": spot.get("samples", 0),
             "scanners": len(spot.get("scanners", {})),
             "duration_s": spot.get("duration_s"),
+            "raw_file": spot.get("raw", {}).get("file"),
+            "raw_samples": spot.get("raw", {}).get("samples"),
             "created": spot.get("created"),
             "updated": spot.get("updated"),
         }
@@ -354,7 +377,13 @@ class FingerprintManager:
             vol.Schema({vol.Optional("spot_id"): cv.string, **_ROOM_FIELDS, vol.Optional("label"): cv.string}),
             SupportsResponse.OPTIONAL,
         )
-        reg(DOMAIN, SERVICE_CLEAR, self._svc_clear, vol.Schema(_ROOM_FIELDS), SupportsResponse.OPTIONAL)
+        reg(
+            DOMAIN,
+            SERVICE_CLEAR,
+            self._svc_clear,
+            vol.Schema({**_ROOM_FIELDS, vol.Optional("all", default=False): cv.boolean}),
+            SupportsResponse.OPTIONAL,
+        )
         reg(DOMAIN, SERVICE_LIST, self._svc_list, vol.Schema({}), SupportsResponse.ONLY)
         reg(
             DOMAIN,
@@ -414,7 +443,7 @@ class FingerprintManager:
             label=label,
             spot_id=replace_id,
             carry=data.get("carry"),
-            recorder=SpotRecorder(monotonic_time_coarse(), data["duration"]),
+            recorder=SpotRecorder(monotonic_time_coarse(), data["duration"], keep_raw=True),
             started=dt_now().isoformat(timespec="seconds"),
         )
         self.recording = session
@@ -444,21 +473,34 @@ class FingerprintManager:
         return self._delete(ids)
 
     async def _svc_clear(self, call: ServiceCall) -> ServiceResponse:
+        if call.data.get("all"):
+            if call.data.get("area_id") or call.data.get("room"):
+                raise ServiceValidationError("Give either all: true or a room/area_id, not both")
+            result = self._delete({s["id"] for s in self.spots}, raw_files=False)
+            self._raw_io(delete_raw_files, self.raw_dir, None)  # also files of spots no longer in the store
+            return result
+        if not (call.data.get("area_id") or call.data.get("room")):
+            raise ServiceValidationError("Give an area_id or a room, or all: true to clear every room")
         room = self._resolve_room(call.data, create=False)
         return self._delete({s["id"] for s in self.spots if s["room"] == room})
 
-    def _delete(self, ids: set[str]) -> dict[str, Any]:
+    def _delete(self, ids: set[str], raw_files: bool = True) -> dict[str, Any]:
         before = len(self.spots)
+        gone = [s for s in self.spots if s["id"] in ids]
         self.spots = [s for s in self.spots if s["id"] not in ids]
         deleted = before - len(self.spots)
         if deleted:
             self._spots_changed()
+            if raw_files:
+                names = [s.get("raw", {}).get("file") or raw_file_name(s["id"]) for s in gone]
+                self._raw_io(delete_raw_files, self.raw_dir, names)
         return {"deleted": deleted, "remaining": len(self.spots)}
 
     async def _svc_list(self, call: ServiceCall) -> ServiceResponse:
         return {
             "mode": self.mode,
             "spots": len(self.spots),
+            "raw_dir": self.raw_dir,
             "rooms": {k: v for k, v in self.areas_overview().items() if v["count"]},
         }
 
@@ -534,7 +576,7 @@ class FingerprintManager:
                 for stamp, rssi in zip(advert.hist_stamp, advert.hist_rssi, strict=False):
                     if not stamp or stamp <= last:
                         break
-                    rec.recorder.add(advert.scanner_address, stamp, rssi)
+                    rec.recorder.add(advert.scanner_address, stamp, rssi, advert.device_address)
                 if advert.hist_stamp and advert.hist_stamp[0]:
                     rec.last_taken[key] = max(last, advert.hist_stamp[0])
         rec.recorder.finish_gap(nowstamp)
@@ -586,15 +628,33 @@ class FingerprintManager:
             state, message = "failed", f"Recording {room_name} {rec.label} failed: no readings from the device"
         else:
             stamp = dt_now().isoformat(timespec="seconds")
+            new_id = rec.spot_id or uuid.uuid4().hex[:12]
+            raw_doc = rec.recorder.raw_document(
+                {
+                    "spot_id": new_id,
+                    "room": rec.room,
+                    "room_name": room_name,
+                    "area_id": self.room_area_id(rec.room),
+                    "label": rec.label,
+                    "device": rec.device_address,
+                    "carry": rec.carry,
+                    "started": rec.started,
+                }
+            )
+            raw_name = raw_file_name(new_id)
             spot = {
-                "id": rec.spot_id or uuid.uuid4().hex[:12],
+                "id": new_id,
                 "label": rec.label,
                 "room": rec.room,
                 "created": stamp,
                 "updated": stamp,
                 "recorded_with": {"device": rec.device_address, "carry": rec.carry},
                 **built,
+                "raw": {"file": raw_name, "samples": raw_doc["samples"]},
             }
+            # Written once, in the executor; replaces the file of a re-recorded spot.
+            self._raw_io(write_raw_file, self.raw_dir, raw_name, raw_doc)
+            rec.recorder.raw = None  # the in-memory buffer is no longer needed
             if rec.spot_id:
                 for i, old in enumerate(self.spots):
                     if old["id"] == rec.spot_id:

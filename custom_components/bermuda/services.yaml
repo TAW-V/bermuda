@@ -93,6 +93,11 @@ clear_fingerprints:
       required: false
       selector:
         text:
+    all:
+      required: false
+      default: false
+      selector:
+        boolean:
 list_fingerprints:
 evaluate_fingerprints:
   fields:

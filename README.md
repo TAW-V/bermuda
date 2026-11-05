@@ -22,13 +22,22 @@ live signal pattern against those recordings.
   `area_id` (or a free-text `room` for places that are not HA areas). The label is auto-numbered (`Spot 1`, `Spot 2`,
   ...) unless you give one. Default 120 s (30-600). Record 3-10 spots per room, including rooms without a proxy and
   a spot or two outside. `spot_id` re-records an existing spot.
-- **Manage**: `bermuda.delete_fingerprint` (spot_id, or room + label), `bermuda.clear_fingerprints` (room),
+- **Raw readings**: every recording also keeps its raw readings, written once when it ends (in the executor) to
+  `.storage/bermuda_fingerprints_raw/<spot_id>.json`: metadata (spot_id, room, label, device, carry, started,
+  duration) plus `columns` `["t", "scanner", "source", "rssi"]` and `readings` rows (t = seconds since the start,
+  source = the advert MAC). The spot links it as `raw: {file, samples}`. They are only for offline training and
+  replay; live matching uses the summaries, and nothing raw is kept in memory outside a recording. Deleting,
+  clearing or re-recording a spot deletes or replaces its file.
+- **Manage**: `bermuda.delete_fingerprint` (spot_id, or room + label), `bermuda.clear_fingerprints` (room, or
+  `all: true` for every room and all raw files),
   `bermuda.list_fingerprints`, `bermuda.map_room` (move a free-text room to an HA area), `bermuda.cancel_fingerprint`.
 - **Validate**: `bermuda.evaluate_fingerprints` returns leave-one-spot-out accuracy on the recorded 10 s windows,
   balanced accuracy (mean per-room recall), log-loss and confidence, next to the nearest-proxy baseline, plus a
   confusion matrix and the worst spots. Offline: `python3 -I scripts/fingerprint_eval.py --storage /config/.storage`
   compares matcher variants, smoothing and live-like perturbations (fewer/more scanners, level shifts);
-  `--latency` simulates room changes (switching time, flicker) for the switching presets and a settings grid.
+  `--latency` simulates room changes (switching time, flicker) for the switching presets and a settings grid,
+  replaying the recorded raw readings where a spot has a raw file (`--no-raw`: synthetic readings from the
+  summaries, as before fp6).
 - **Matcher** (default `knn`): per spot the RMS difference in dB between the live vector and the spot means, over
   the same set of scanners for every spot (a scanner not heard counts as -100 dBm), so a spot that lists many weak
   scanners gains nothing from that. A room's score is a count-normalised mixture over its spots (a room with more

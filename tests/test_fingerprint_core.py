@@ -139,6 +139,76 @@ class TestRecorder(unittest.TestCase):
         self.assertAlmostEqual(rec.max_gap, 38)
 
 
+class TestRawReadings(unittest.TestCase):
+    def _recorder(self):
+        rec = fc.SpotRecorder(start=100.0, duration=30, keep_raw=True)
+        rec.add("aa:00:00:00:00:02", 104.5, -70, "ee:00:00:00:00:0a")
+        rec.add("aa:00:00:00:00:01", 101.25, -60, "ee:00:00:00:00:0a")
+        rec.add("aa:00:00:00:00:01", 101.25, -60, "ee:00:00:00:00:0a")  # duplicate: not kept twice
+        rec.add("aa:00:00:00:00:01", 99.0, -60, "ee:00:00:00:00:0a")  # before start: not kept
+        rec.add("aa:00:00:00:00:01", 107.0, -127, "ee:00:00:00:00:0a")  # invalid: not kept
+        rec.add("aa:00:00:00:00:01", 108.0, -61)  # no source
+        return rec
+
+    def test_not_kept_by_default(self):
+        rec = fc.SpotRecorder(start=0.0, duration=30)
+        rec.add("s1", 1, -60, "x")
+        self.assertIsNone(rec.raw)
+        self.assertEqual(rec.raw_document()["readings"], [])
+
+    def test_document(self):
+        rec = self._recorder()
+        spot = rec.build()
+        doc = rec.raw_document({"spot_id": "abc", "room": "kitchen", "device": "ff:00:00:00:00:01"})
+        self.assertEqual(doc["format"], fc.RAW_FORMAT)
+        self.assertEqual(doc["version"], fc.RAW_VERSION)
+        self.assertEqual(doc["spot_id"], "abc")
+        self.assertEqual(doc["duration_s"], 30)
+        self.assertEqual(doc["columns"], ["t", "scanner", "source", "rssi"])
+        self.assertEqual(doc["samples"], spot["samples"])
+        self.assertEqual(
+            doc["readings"],
+            [
+                [1.25, "aa:00:00:00:00:01", "ee:00:00:00:00:0a", -60.0],
+                [4.5, "aa:00:00:00:00:02", "ee:00:00:00:00:0a", -70.0],
+                [8.0, "aa:00:00:00:00:01", None, -61.0],
+            ],
+        )
+        per = fc.raw_readings(doc)
+        self.assertEqual(per["aa:00:00:00:00:01"], [(1.25, -60.0), (8.0, -61.0)])
+        self.assertEqual(per["aa:00:00:00:00:02"], [(4.5, -70.0)])
+
+    def test_files(self):
+        import tempfile
+
+        rec = self._recorder()
+        doc = rec.raw_document({"spot_id": "abc"})
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "raw"
+            path = fc.write_raw_file(d, fc.raw_file_name("abc"), doc)
+            self.assertEqual(path.name, "abc.json")
+            self.assertEqual(fc.read_raw_file(path), doc)
+            self.assertEqual([p.name for p in d.iterdir()], ["abc.json"])  # no temp file left
+            # re-recording replaces the file
+            doc2 = {**doc, "readings": doc["readings"][:1], "samples": 1}
+            fc.write_raw_file(d, "abc.json", doc2)
+            self.assertEqual(fc.read_raw_file(path)["samples"], 1)
+            fc.write_raw_file(d, "def.json", doc)
+            (d / "notes.txt").write_text("keep")
+            # delete by name, missing names are fine, no path escape
+            (Path(tmp) / "outside.json").write_text("{}")
+            self.assertEqual(fc.delete_raw_files(d, ["abc.json", "missing.json", "../outside.json"]), 1)
+            self.assertTrue((Path(tmp) / "outside.json").exists())
+            self.assertFalse(path.exists())
+            # clear all: every raw file, other files kept
+            self.assertEqual(fc.delete_raw_files(d), 1)
+            self.assertEqual([p.name for p in d.iterdir()], ["notes.txt"])
+            self.assertEqual(fc.delete_raw_files(Path(tmp) / "nope"), 0)
+            (d / "bad.json").write_text('{"format": "other"}')
+            with self.assertRaises(ValueError):
+                fc.read_raw_file(d / "bad.json")
+
+
 class TestMatcher(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

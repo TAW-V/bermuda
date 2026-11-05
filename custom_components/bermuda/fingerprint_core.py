@@ -21,11 +21,18 @@ Concepts
   every spot is flagged as an outlier so the caller can fall back.
 - ``RoomSmoother`` applies an EMA, hysteresis and minimum dwell time, and
   decides when to fall back to Bermuda's own nearest-proxy area.
+- Raw readings (fp6): a recording also keeps every accepted reading (time since the
+  start, scanner, advert MAC, RSSI). They are written once to a JSON file next to the
+  store (see ``raw_document``) for offline training / replay; the live matcher only
+  uses the summaries above.
 """
 
 from __future__ import annotations
 
+import json
 import math
+import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +45,9 @@ SIGMA_MIN = 4.0  # bayes: per-scanner std floor
 SIGMA_MAX = 12.0
 SEEN_MIN = 0.05
 SEEN_MAX = 0.95
+RAW_FORMAT = "bermuda-fingerprint-raw"  # raw recording files (one JSON file per spot)
+RAW_VERSION = 1
+RAW_COLUMNS = ["t", "scanner", "source", "rssi"]  # t = seconds since the recording start
 UNKNOWN_MEAN = -100.0  # bayes: model for a scanner never heard at a spot
 UNKNOWN_SIGMA = 6.0
 MISSING_RSSI = -100.0  # knn: a scanner not heard counts as this (and readings are floored here)
@@ -167,12 +177,14 @@ def live_vector(
 class SpotRecorder:
     """Accumulates readings for one spot and builds the stored spot dict."""
 
-    def __init__(self, start: float, duration: float, window: float = WINDOW_S) -> None:
+    def __init__(self, start: float, duration: float, window: float = WINDOW_S, keep_raw: bool = False) -> None:
         self.start = start
         self.duration = float(duration)
         self.window = window
         self._seen_keys: set[tuple[str, float, float]] = set()
         self.readings: dict[str, list[tuple[float, float]]] = {}
+        # (stamp, scanner, source advert address, rssi) of every accepted reading, if kept
+        self.raw: list[tuple[float, str, str | None, float]] | None = [] if keep_raw else None
         self.last_reading: float | None = None
         self.max_gap: float = 0.0
 
@@ -187,8 +199,8 @@ class SpotRecorder:
     def samples_per_scanner(self) -> dict[str, int]:
         return {s: len(v) for s, v in self.readings.items()}
 
-    def add(self, scanner: str, stamp: float, rssi: float | None) -> bool:
-        """Add one reading. Returns True if it was new and accepted."""
+    def add(self, scanner: str, stamp: float, rssi: float | None, source: str | None = None) -> bool:
+        """Add one reading (`source` = the advert's MAC, kept in the raw list). True if new and accepted."""
         if not valid_rssi(rssi) or stamp < self.start or stamp > self.end:
             return False
         key = (scanner, stamp, rssi)
@@ -196,6 +208,8 @@ class SpotRecorder:
             return False
         self._seen_keys.add(key)
         self.readings.setdefault(scanner, []).append((stamp, float(rssi)))
+        if self.raw is not None:
+            self.raw.append((stamp, scanner, source, float(rssi)))
         if self.last_reading is None or stamp > self.last_reading:
             self.last_reading = stamp
         return True
@@ -241,6 +255,83 @@ class SpotRecorder:
             "window_scanners": order,
             "windows": windows,
         }
+
+
+    def raw_document(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        """
+        The raw readings as a JSON-ready document (requires keep_raw).
+
+        ``readings`` rows follow ``columns``: t (seconds since the start, ms resolution),
+        scanner address, source advert address (or None), RSSI in dBm; sorted by t.
+        `meta` (spot id, room, label, device, ...) is merged in at the top level.
+        """
+        rows = sorted(self.raw or [], key=lambda r: (r[0], r[1]))
+        return {
+            "format": RAW_FORMAT,
+            "version": RAW_VERSION,
+            **(meta or {}),
+            "duration_s": int(self.duration),
+            "window_s": self.window,
+            "samples": len(rows),
+            "columns": list(RAW_COLUMNS),
+            "readings": [[round(t - self.start, 3), s, src, rssi] for t, s, src, rssi in rows],
+        }
+
+
+# ---------------------------------------------------------------------------
+# Raw recording files (blocking file I/O: call from an executor inside HA)
+# ---------------------------------------------------------------------------
+def raw_file_name(spot_id: str) -> str:
+    return f"{spot_id}.json"
+
+
+def write_raw_file(directory: str | Path, name: str, doc: dict[str, Any]) -> Path:
+    """Write one raw document atomically (temp file + rename); creates the directory."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    tmp = path.with_name(f".{name}.tmp")
+    tmp.write_text(json.dumps(doc, separators=(",", ":")), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def read_raw_file(path: str | Path) -> dict[str, Any]:
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    if doc.get("format") != RAW_FORMAT:
+        raise ValueError(f"{path}: not a {RAW_FORMAT} file")
+    return doc
+
+
+def delete_raw_files(directory: str | Path, names: list[str] | None = None) -> int:
+    """Delete the named raw files, or with names=None every raw file in the directory. Returns the count."""
+    directory = Path(directory)
+    if not directory.is_dir():
+        return 0
+    if names is None:
+        paths = [p for p in directory.iterdir() if p.is_file() and (p.suffix == ".json" or p.name.endswith(".tmp"))]
+    else:
+        paths = [directory / Path(n).name for n in names]  # never leave the directory
+    count = 0
+    for path in paths:
+        try:
+            path.unlink()
+            count += 1
+        except FileNotFoundError:
+            pass
+    return count
+
+
+def raw_readings(doc: dict[str, Any]) -> dict[str, list[tuple[float, float]]]:
+    """Per scanner the (t, rssi) readings of a raw document (all advert sources merged), sorted by t."""
+    cols = doc.get("columns", RAW_COLUMNS)
+    i_t, i_s, i_r = cols.index("t"), cols.index("scanner"), cols.index("rssi")
+    out: dict[str, list[tuple[float, float]]] = {}
+    for row in doc.get("readings", []):
+        out.setdefault(row[i_s], []).append((float(row[i_t]), float(row[i_r])))
+    for items in out.values():
+        items.sort()
+    return out
 
 
 def spot_windows(spot: dict[str, Any]) -> list[dict[str, float]]:

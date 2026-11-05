@@ -199,7 +199,7 @@
     },
     "clear_fingerprints": {
       "name": "Clear fingerprints",
-      "description": "Delete all spots of one room.",
+      "description": "Delete all spots of one room, or of every room with all. Their raw recording files are deleted too.",
       "fields": {
         "area_id": {
           "name": "Area",
@@ -208,12 +208,16 @@
         "room": {
           "name": "Room",
           "description": "Room name or label to clear."
+        },
+        "all": {
+          "name": "All rooms",
+          "description": "Delete every spot of every room (and all raw recording files) instead of one room."
         }
       }
     },
     "list_fingerprints": {
       "name": "List fingerprints",
-      "description": "Return all rooms and spots (without raw windows)."
+      "description": "Return all rooms and spots (without raw windows). Raw readings of each recording are in raw_dir (.storage/bermuda_fingerprints_raw/<spot_id>.json)."
     },
     "evaluate_fingerprints": {
       "name": "Evaluate fingerprints",
