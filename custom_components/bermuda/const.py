@@ -210,6 +210,8 @@ CONF_FP_OFFSET_MAX, DEFAULT_FP_OFFSET_MAX = "fingerprint_offset_max", _fpc.OFFSE
 DOCS[CONF_FP_OFFSET_MAX] = "Cap (dB) of the estimated per-device offset; 0 disables offset estimation."
 CONF_FP_OUTLIER_DB, DEFAULT_FP_OUTLIER_DB = "fingerprint_outlier_db", _fpc.OUTLIER_DB
 DOCS[CONF_FP_OUTLIER_DB] = "Fall back to nearest-proxy when the nearest spot is farther than this (RMS dB); 0 disables."
+CONF_FP_FOREIGN_PENALTY, DEFAULT_FP_FOREIGN_PENALTY = "fingerprint_foreign_spot_penalty", _fpc.FOREIGN_PENALTY_DB
+DOCS[CONF_FP_FOREIGN_PENALTY] = "Spots recorded with another device count as this much farther (dB); 0 disables."
 CONF_FP_MIN_CONFIDENCE, DEFAULT_FP_MIN_CONFIDENCE = "fingerprint_min_confidence", 0.5
 DOCS[CONF_FP_MIN_CONFIDENCE] = "Fall back to nearest-proxy when the smoothed room probability is below this."
 # Room switching speed: a preset, or "custom" with the individual values below.
@@ -234,6 +236,7 @@ FINGERPRINT_OPTION_KEYS = (
     CONF_FP_METHOD,
     CONF_FP_OFFSET_MAX,
     CONF_FP_OUTLIER_DB,
+    CONF_FP_FOREIGN_PENALTY,
     CONF_FP_MIN_CONFIDENCE,
     CONF_FP_PRESET,
     *FP_SWITCHING_KEYS,

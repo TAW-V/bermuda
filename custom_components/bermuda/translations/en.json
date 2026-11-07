@@ -43,6 +43,7 @@
           "fingerprint_method": "Fingerprint matcher",
           "fingerprint_offset_max": "Fingerprint device offset cap (dB)",
           "fingerprint_outlier_db": "Fingerprint outlier distance (dB)",
+          "fingerprint_foreign_spot_penalty": "Fingerprint penalty for spots of other devices (dB)",
           "fingerprint_min_confidence": "Fingerprint minimum confidence",
           "fingerprint_preset": "Fingerprint room switching",
           "fingerprint_live_window": "Fingerprint live window (s, custom)",
@@ -62,6 +63,7 @@
           "fingerprint_method": "`knn` (default): compares absolute RSSI levels with every recorded spot; robust when more or fewer far scanners are heard. `bayes`: naive Bayes with a heard/not-heard term; can be sharper but leans on how many weak scanners are heard.",
           "fingerprint_offset_max": "Estimate a per-device level offset (phone in a pocket, another transmitter) up to this many dB. 0 (default) disables it: between adjacent rooms the absolute level is often the only difference.",
           "fingerprint_outlier_db": "If even the nearest recorded spot is farther than this (RMS dB over the heard scanners), the position is not covered by any spot and Bermuda's nearest-proxy area is used. Default 10. 0 disables the check.",
+          "fingerprint_foreign_spot_penalty": "Spots recorded with another device count as this many dB farther away than they are, so a device prefers its own spots. Only applied when the device has recorded spots itself, so a device without own spots uses all spots as before. Spots without a stored recording device are never penalised. Default 8: a foreign spot only wins where the device has no own spot nearby. 0 disables it.",
           "fingerprint_min_confidence": "Below this smoothed room probability the nearest-proxy area is used. Default 0.5.",
           "fingerprint_preset": "How fast the fingerprint room follows a move. `fast`: about 5 s, more flicker. `balanced` (default): about 8 s. `stable`: about 13 s, least flicker (the fp4 behaviour). `custom`: use the four values below. The values below are ignored unless this is `custom`.",
           "fingerprint_live_window": "Seconds of readings per scanner whose median forms the live vector (3-30). The Shelly proxies report about every 3 s per scanner, so 6-12 s holds 2-4 readings. Shorter reacts faster but is noisier. fast 6, balanced 8, stable 12.",
@@ -151,11 +153,11 @@
         },
         "spot_id": {
           "name": "Spot ID",
-          "description": "Re-record this existing spot (keeps its room and label)."
+          "description": "Re-record this existing spot (keeps its room and label). Its samples, and the device stored with it, are replaced by the new recording."
         },
         "device": {
           "name": "Device",
-          "description": "Bermuda device address or name. Defaults to the only tracked device."
+          "description": "Bermuda device address, name or device ID. Defaults to the only tracked device. Stored with the spot."
         },
         "duration": {
           "name": "Duration",
@@ -167,7 +169,7 @@
         },
         "replace": {
           "name": "Replace",
-          "description": "Replace an existing spot with the same label in the same room."
+          "description": "Replace an existing spot with the same label in the same room (whichever device recorded it). Off: always add a new spot."
         }
       }
     },
@@ -242,6 +244,10 @@
         "outlier_db": {
           "name": "Outlier distance",
           "description": "Outlier threshold in dB (0 = off; default: configured)."
+        },
+        "foreign_penalty": {
+          "name": "Foreign spot penalty",
+          "description": "Penalty in dB for spots of other devices (0 = off; default: configured)."
         },
         "details": {
           "name": "Details",

@@ -126,6 +126,15 @@ evaluate_fingerprints:
           step: 0.5
           unit_of_measurement: dB
           mode: box
+    foreign_penalty:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 40
+          step: 0.5
+          unit_of_measurement: dB
+          mode: box
     use_offset:
       required: false
       selector:

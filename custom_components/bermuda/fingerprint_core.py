@@ -61,6 +61,12 @@ OFFSET_MIN_SCANNERS = 4  # only estimate an offset when this many strong common 
 PRESENCE_WEIGHT = 1.0  # bayes: weight of the seen / not-seen log terms
 KNN_SCALE_DB = 4.0  # knn: score = -0.5 (rms_db / scale)^2
 OUTLIER_DB = 10.0  # nearest spot farther than this (RMS dB) -> outlier, fall back; 0 disables
+# Spots recorded with another device than the one being matched count as this much farther away (knn:
+# added to the RMS dB distance; bayes: the same as a log-likelihood penalty of 0.5 (P / KNN_SCALE_DB)^2).
+# Large on purpose: in-room held-out distances stay below ~6 dB and the neighbouring room is ~12 dB away,
+# so a device's own spots win unless it has none near its position. Only applied when the device has
+# spots of its own; spots without a recording device are never penalised. 0 disables it.
+FOREIGN_PENALTY_DB = 8.0
 MIN_COMMON = 3  # Minimum common heard scanners for a spot to be scored
 TEMPERATURE = 0.3  # knn softmax temperature (lowest leave-one-out log-loss)
 TEMPERATURE_BAYES = 0.5  # bayes softmax temperature
@@ -387,6 +393,7 @@ class SpotScore:
     common: int  # heard live and known at the spot
     offset: float  # estimated device offset in dB
     distance: float = 0.0  # dB: sqrt(sum of squared differences / heard scanners), missing = floor
+    foreign: bool = False  # recorded with another device (scored with the foreign-spot penalty)
 
 
 @dataclass(slots=True)
@@ -404,6 +411,14 @@ class _SpotModel:
     spot_id: str
     room: str
     scanners: dict[str, _ScannerModel]
+    device: str | None = None  # address of the device the spot was recorded with (None = unknown)
+
+
+def spot_device(spot: dict[str, Any]) -> str | None:
+    """Address of the device a stored spot was recorded with, or None when unknown."""
+    rec = spot.get("recorded_with")
+    dev = rec.get("device") if isinstance(rec, dict) else None
+    return str(dev) if dev else None
 
 
 class Matcher:
@@ -425,6 +440,10 @@ class Matcher:
     A room's score aggregates its best ``room_k`` spots (0 = all) with ``room_agg``; the room
     posterior is a softmax over room scores with ``temperature``. If the nearest spot is farther
     than ``outlier_db`` the result is flagged as an outlier (``outlier_db = 0`` disables this).
+
+    ``match(..., device=address)`` prefers the spots recorded with that device: when the device has
+    spots of its own, spots recorded with another device are scored ``foreign_penalty`` dB farther
+    away (see FOREIGN_PENALTY_DB). The outlier distance is not penalised.
     """
 
     def __init__(
@@ -444,6 +463,7 @@ class Matcher:
         min_common: int = MIN_COMMON,
         outlier_db: float = OUTLIER_DB,
         missing_rssi: float = MISSING_RSSI,
+        foreign_penalty: float = FOREIGN_PENALTY_DB,
     ) -> None:
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
@@ -464,6 +484,7 @@ class Matcher:
         self.min_common = min_common
         self.outlier_db = max(0.0, float(outlier_db))
         self.floor = float(missing_rssi)
+        self.foreign_penalty = max(0.0, float(foreign_penalty))
         self._unknown = _unknown_model(self.sigma_min)
         self.spots: list[_SpotModel] = []
         self.known_scanners: set[str] = set()
@@ -471,8 +492,9 @@ class Matcher:
             models = {s: _ScannerModel.from_stats(st, self.sigma_min) for s, st in spot.get("scanners", {}).items()}
             if not models or not spot.get("room"):
                 continue
-            self.spots.append(_SpotModel(str(spot.get("id")), str(spot["room"]), models))
+            self.spots.append(_SpotModel(str(spot.get("id")), str(spot["room"]), models, spot_device(spot)))
             self.known_scanners.update(models)
+        self.devices: set[str] = {s.device for s in self.spots if s.device}
 
     def __len__(self) -> int:
         return len(self.spots)
@@ -495,6 +517,7 @@ class Matcher:
         heard: dict[str, float],
         scanners: set[str],
         extra: tuple[float, int] = (0.0, 0),
+        penalty: float = 0.0,
     ) -> SpotScore | None:
         """
         Score one spot over `scanners`, the SAME set for every spot (all known, active
@@ -502,7 +525,8 @@ class Matcher:
         spots that list many (weak) scanners and make them win (the fp3 bias).
 
         `heard` holds only known scanners; `extra` is (sum of squares, count) of heard
-        scanners no spot knows, which only count towards the outlier distance.
+        scanners no spot knows, which only count towards the outlier distance. `penalty`
+        (dB) is added to the knn distance (bayes: subtracted as its knn-equivalent score).
         """
         common = [s for s in heard if s in spot.scanners]
         if len(common) < self.min_common:
@@ -540,9 +564,15 @@ class Matcher:
             if self.use_offset:
                 loglik -= 0.5 * (offset / OFFSET_PRIOR_DB) ** 2
             score = loglik / max(1, len(heard))
+            if penalty:
+                score -= 0.5 * (penalty / self.knn_scale) ** 2
+        elif penalty:
+            score = -0.5 * ((math.sqrt(sq / max(1, len(heard))) + penalty) / self.knn_scale) ** 2
         else:
             score = -0.5 * (sq / max(1, len(heard))) / self.knn_scale**2
-        return SpotScore(spot.spot_id, spot.room, score, len(scanners), len(common), offset, distance)
+        return SpotScore(
+            spot.spot_id, spot.room, score, len(scanners), len(common), offset, distance, foreign=penalty > 0
+        )
 
     def _room_score(self, scores: list[float]) -> float:
         scores = sorted(scores, reverse=True)
@@ -556,14 +586,19 @@ class Matcher:
         top = scores[0]
         return top + t * math.log(sum(math.exp((s - top) / t) for s in scores) / len(scores))
 
-    def match(self, live: dict[str, float], active: set[str] | None = None) -> MatchResult | None:
+    def match(
+        self, live: dict[str, float], active: set[str] | None = None, device: str | None = None
+    ) -> MatchResult | None:
         """
         Match a live vector.
 
         `active` is the set of scanners currently online; scanners outside it are
         ignored on both sides. Scanners that no spot knows do not affect the room
-        scores, but a strong one makes the outlier distance large.
+        scores, but a strong one makes the outlier distance large. `device` is the
+        address of the device being matched: if it recorded spots itself, spots
+        recorded with other devices get the foreign-spot penalty.
         """
+        own = bool(device) and self.foreign_penalty > 0 and device in self.devices
         live = {s: x for s, x in live.items() if active is None or s in active}
         heard = {s: x for s, x in live.items() if s in self.known_scanners}
         unknown = [max(x, DISTANCE_FLOOR) - DISTANCE_FLOOR for s, x in live.items() if s not in self.known_scanners]
@@ -571,7 +606,8 @@ class Matcher:
         scanners = self.known_scanners if active is None else active & self.known_scanners
         per_room: dict[str, list[SpotScore]] = {}
         for spot in self.spots:
-            sc = self.score_spot(spot, heard, scanners, extra)
+            penalty = self.foreign_penalty if own and spot.device and spot.device != device else 0.0
+            sc = self.score_spot(spot, heard, scanners, extra, penalty)
             if sc is not None:
                 per_room.setdefault(sc.room, []).append(sc)
         if not per_room:
@@ -794,8 +830,9 @@ def evaluate(
         matcher = Matcher(others, **matcher_kwargs)
         room = spot["room"]
         n = ok = base_ok = 0
+        dev = spot_device(spot)  # the held-out spot plays the device it was recorded with
         for vec in spot_windows(spot):
-            res = matcher.match(vec)
+            res = matcher.match(vec, device=dev)
             pred = max(res.posterior, key=res.posterior.get) if res else None
             n += 1
             ok += pred == room

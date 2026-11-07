@@ -32,6 +32,7 @@ MOCK_OPTIONS_GLOBALS = {
     custom_components.bermuda.const.CONF_FP_METHOD: "knn",
     custom_components.bermuda.const.CONF_FP_OFFSET_MAX: 0.0,
     custom_components.bermuda.const.CONF_FP_OUTLIER_DB: 10.0,
+    custom_components.bermuda.const.CONF_FP_FOREIGN_PENALTY: 8.0,
     custom_components.bermuda.const.CONF_FP_MIN_CONFIDENCE: 0.5,
     custom_components.bermuda.const.CONF_FP_PRESET: "custom",
     custom_components.bermuda.const.CONF_FP_LIVE_WINDOW: 10.0,

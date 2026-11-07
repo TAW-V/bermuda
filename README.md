@@ -21,7 +21,15 @@ live signal pattern against those recordings.
 - **Record spots**: stand still at a spot with the tracked device and call `bermuda.record_fingerprint` with an
   `area_id` (or a free-text `room` for places that are not HA areas). The label is auto-numbered (`Spot 1`, `Spot 2`,
   ...) unless you give one. Default 120 s (30-600). Record 3-10 spots per room, including rooms without a proxy and
-  a spot or two outside. `spot_id` re-records an existing spot.
+  a spot or two outside. `spot_id` re-records an existing spot (its samples and recording device are replaced);
+  without it a recording always adds a new spot, unless `replace: true` and a spot with the same label exists in
+  that room. With several tracked devices give `device` (address, name or device ID). Each spot stores the device
+  it was recorded with (`recorded_with`: address, device ID, name); `list_fingerprints` and the spots sensor show it.
+- **Several devices**: spots are shared, but a device prefers its own. When a device has recorded spots itself,
+  spots recorded with another device count as `foreign_spot_penalty` dB (default 8) farther away, so they only win
+  where the device has no own spot nearby (in-room distances stay below ~6 dB, the next room is ~12 dB away). A
+  device without own spots uses all spots unpenalised, and spots without a stored device are never penalised. The
+  outlier check uses the unpenalised distance.
 - **Raw readings**: every recording also keeps its raw readings, written once when it ends (in the executor) to
   `.storage/bermuda_fingerprints_raw/<spot_id>.json`: metadata (spot_id, room, label, device, carry, started,
   duration) plus `columns` `["t", "scanner", "source", "rssi"]` and `readings` rows (t = seconds since the start,
@@ -55,7 +63,9 @@ live signal pattern against those recordings.
   (`scripts/fingerprint_eval.py --latency`): balanced halves the switching time of fp4 for about twice the
   flicker (0.3 -> 0.6 room changes per minute standing still, in-sample) with the same time in a wrong room.
 - **Options** (Bermuda options -> Global options): fingerprint matcher (`knn` / `bayes`), device offset cap
-  (dB, 0 = off, default 0), outlier distance (dB, 0 = off, default 10), minimum confidence (default 0.5),
+  (dB, 0 = off, default 0), outlier distance (dB, 0 = off, default 10), penalty for spots of other devices
+  (`fingerprint_foreign_spot_penalty`, dB, 0 = off, default 8; bayes subtracts the same as a score),
+  minimum confidence (default 0.5),
   room switching preset (default `balanced`) and, for `custom`, live window (3-30 s), smoothing tau (0-30 s),
   confirm cycles (1-10) and minimum dwell (0-60 s).
 - **Mode** (Bermuda options → Global options → Fingerprint mode):
@@ -82,7 +92,7 @@ picker ("Bermuda fingerprint card") or in YAML:
 ```yaml
 type: custom:bermuda-fingerprint-card
 # all optional:
-device: sensor.my_phone_fingerprint_room  # any Bermuda entity of the device; auto when there is only one
+device: sensor.my_phone_fingerprint_room  # fixes the device and hides the dropdown (any Bermuda entity of it)
 duration: 60                              # recording seconds (30-600)
 show_areas_without_spots: true
 exclude_areas: [garage]
@@ -94,6 +104,12 @@ It shows every area grouped by floor, with its spot count (grey: none, orange: 1
 recording. Tap an area to list its spots, with re-record and delete (tap twice to confirm) and "delete all". The
 top of the card shows the fingerprint room next to Bermuda's nearest-proxy area. The card follows the HA theme and
 language (English and Dutch included) and has a visual editor.
+
+With more than one tracked device (and no `device` in the config) a **Record with** dropdown at the top lists every
+device that has a fingerprint room sensor; new devices appear by themselves. The choice is remembered per browser
+(localStorage) and is used for recording and for the live room. Every spot shows the device it was recorded with
+(highlighted when it is the selected one). **+ spot** always adds a new spot, so spots of other devices stay;
+re-record replaces that spot's samples with a recording by the selected device and asks "Replace with <device>?".
 
 
 

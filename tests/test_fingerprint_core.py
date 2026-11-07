@@ -558,5 +558,114 @@ class TestEvaluate(unittest.TestCase):
         self.assertEqual(fc.nearest_proxy_room(vec, SCANNER_ROOM, {"aa:00:00:00:00:01": 5}), "kitchen")
 
 
+
+def flat_spot(spot_id, room, means, device=None):
+    """A hand-made spot: scanner -> mean RSSI, always heard."""
+    spot = {
+        "id": spot_id,
+        "room": room,
+        "label": spot_id,
+        "scanners": {s: {"mean": m, "std": 3.0, "seen": 0.95, "n": 20} for s, m in means.items()},
+    }
+    if device:
+        spot["recorded_with"] = {"device": device, "carry": None}
+    return spot
+
+
+class TestForeignSpotPenalty(unittest.TestCase):
+    """Spots recorded with another device only win when the device has no own spot near its position."""
+
+    DEV_A = "0123456789abcdef0123456789abcdef_1_1"  # made up
+    DEV_B = "fedcba9876543210fedcba9876543210_2_2"
+    LIVE = {"aa:00:00:00:00:01": -60.0, "aa:00:00:00:00:02": -70.0, "aa:00:00:00:00:03": -80.0}
+
+    def spots(self):
+        near = {s: v for s, v in self.LIVE.items()}  # foreign spot, 0 dB from the live vector
+        own = {s: v + 3.0 for s, v in self.LIVE.items()}  # own spot, 3 dB away
+        far = {s: v - 20.0 for s, v in self.LIVE.items()}
+        return [
+            flat_spot("foreign-hall", "hall", near, self.DEV_B),
+            flat_spot("own-study", "study", own, self.DEV_A),
+            flat_spot("own-garden", "garden", far, self.DEV_A),
+        ]
+
+    @staticmethod
+    def room(res):
+        return max(res.posterior, key=res.posterior.get)
+
+    def test_spot_device(self):
+        self.assertEqual(fc.spot_device(flat_spot("x", "r", {}, self.DEV_A)), self.DEV_A)
+        self.assertIsNone(fc.spot_device(flat_spot("x", "r", {})))
+        self.assertIsNone(fc.spot_device({"recorded_with": "junk"}))
+
+    def test_own_spot_beats_slightly_closer_foreign_spot(self):
+        for method in fc.METHODS:
+            with self.subTest(method=method):
+                res = fc.Matcher(self.spots(), method=method, outlier_db=0).match(self.LIVE, device=self.DEV_A)
+                self.assertEqual(self.room(res), "study")
+                self.assertEqual(res.best.spot_id, "own-study")
+                self.assertTrue(res.room_best["hall"].foreign)
+                self.assertFalse(res.best.foreign)
+
+    def test_foreign_spot_wins_when_far_closer(self):
+        # Own spots only 20 dB away: the foreign spot (8 dB penalty) is still the better match.
+        spots = [s for s in self.spots() if s["id"] != "own-study"]
+        res = fc.Matcher(spots).match(self.LIVE, device=self.DEV_A)
+        self.assertEqual(self.room(res), "hall")
+
+    def test_device_without_own_spots_uses_all_spots(self):
+        dev_c = "00000000000000000000000000000000_3_3"
+        for method in fc.METHODS:
+            with self.subTest(method=method):
+                matcher = fc.Matcher(self.spots(), method=method)
+                res = matcher.match(self.LIVE, device=dev_c)
+                base = fc.Matcher(self.spots(), method=method, foreign_penalty=0).match(self.LIVE, device=dev_c)
+                self.assertEqual(self.room(res), "hall")
+                self.assertEqual(res.posterior, base.posterior)
+                self.assertFalse(any(sc.foreign for sc in res.room_best.values()))
+        # Only foreign spots for every room: unchanged too.
+        only_b = [s for s in self.spots() if s["recorded_with"]["device"] == self.DEV_B]
+        self.assertEqual(self.room(fc.Matcher(only_b).match(self.LIVE, device=self.DEV_A)), "hall")
+
+    def test_penalty_zero_is_old_behaviour(self):
+        for method in fc.METHODS:
+            with self.subTest(method=method):
+                old = fc.Matcher(self.spots(), method=method, foreign_penalty=0)
+                a = old.match(self.LIVE, device=self.DEV_A)
+                b = old.match(self.LIVE)
+                self.assertEqual(self.room(a), "hall")
+                self.assertEqual(a.posterior, b.posterior)
+        # No device given: no penalty either.
+        res = fc.Matcher(self.spots()).match(self.LIVE)
+        self.assertEqual(self.room(res), "hall")
+
+    def test_spots_without_device_are_never_penalised(self):
+        spots = self.spots()
+        del spots[0]["recorded_with"]
+        res = fc.Matcher(spots).match(self.LIVE, device=self.DEV_A)
+        self.assertEqual(self.room(res), "hall")
+        self.assertFalse(res.best.foreign)
+
+    def test_outlier_distance_not_penalised(self):
+        spots = [s for s in self.spots() if s["id"] != "own-study"]
+        res = fc.Matcher(spots, outlier_db=5.0).match(self.LIVE, device=self.DEV_A)
+        self.assertAlmostEqual(res.distance, 0.0, places=6)
+        self.assertFalse(res.outlier)
+
+    def test_evaluate_uses_the_held_out_device(self):
+        spots = self.spots() + [flat_spot("own-hall", "hall", {s: v + 1 for s, v in self.LIVE.items()}, self.DEV_A)]
+        for spot in spots:
+            spot["window_scanners"] = list(spot["scanners"])
+            spot["windows"] = [[st["mean"] for st in spot["scanners"].values()]]
+
+        def held_out_hall(**kwargs):
+            res = fc.evaluate(spots, outlier_db=0, **kwargs)
+            return next(p["accuracy"] for p in res["per_spot"] if p["id"] == "own-hall")
+
+        # Held out, own-hall (device A) is 1 dB from device B's hall spot and 2 dB from A's study spot.
+        self.assertEqual(held_out_hall(foreign_penalty=0), 1.0)
+        self.assertEqual(held_out_hall(), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

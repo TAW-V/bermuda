@@ -44,6 +44,7 @@
           "fingerprint_method": "Fingerprint-matcher",
           "fingerprint_offset_max": "Maximale apparaat-offset fingerprint (dB)",
           "fingerprint_outlier_db": "Fingerprint-uitbijterafstand (dB)",
+          "fingerprint_foreign_spot_penalty": "Fingerprint-straf voor spots van andere apparaten (dB)",
           "fingerprint_min_confidence": "Minimale zekerheid fingerprint",
           "fingerprint_preset": "Fingerprint ruimtewissel",
           "fingerprint_live_window": "Fingerprint live-venster (s, aangepast)",
@@ -63,6 +64,7 @@
           "fingerprint_method": "`knn` (standaard): vergelijkt de absolute RSSI-niveaus met elke opgenomen spot; robuust als er meer of minder verre scanners gehoord worden. `bayes`: naive Bayes met een gehoord/niet-gehoord-term; soms scherper, maar leunt op hoeveel zwakke scanners gehoord worden.",
           "fingerprint_offset_max": "Schat een niveau-offset per apparaat (telefoon in de broekzak, ander zendertje) tot zoveel dB. 0 (standaard) zet dit uit: tussen aangrenzende ruimtes is het absolute niveau vaak het enige verschil.",
           "fingerprint_outlier_db": "Als zelfs de dichtstbijzijnde spot verder weg is dan dit (RMS dB over de gehoorde scanners), valt de positie buiten alle spots en geldt de ruimte van de dichtstbijzijnde proxy. Standaard 10. 0 zet de controle uit.",
+          "fingerprint_foreign_spot_penalty": "Spots die met een ander apparaat zijn opgenomen tellen als zoveel dB verder weg, zodat een apparaat zijn eigen spots voorrang geeft. Alleen als het apparaat zelf spots heeft opgenomen; een apparaat zonder eigen spots gebruikt alle spots zoals voorheen. Spots zonder opgeslagen opname-apparaat krijgen nooit straf. Standaard 8: een spot van een ander apparaat wint alleen waar het apparaat geen eigen spot in de buurt heeft. 0 zet het uit.",
           "fingerprint_min_confidence": "Onder deze afgevlakte kans geldt de ruimte van de dichtstbijzijnde proxy. Standaard 0,5.",
           "fingerprint_preset": "Hoe snel de fingerprint-ruimte een verplaatsing volgt. `fast`: ongeveer 5 s, meer flikkeren. `balanced` (standaard): ongeveer 8 s. `stable`: ongeveer 13 s, minst flikkeren (het gedrag van fp4). `custom`: gebruik de vier waarden hieronder. Die waarden worden alleen bij `custom` gebruikt.",
           "fingerprint_live_window": "Seconden metingen per scanner waarvan de mediaan de live-vector vormt (3-30). De Shelly-proxies melden ongeveer elke 3 s per scanner, dus 6-12 s bevat 2-4 metingen. Korter reageert sneller maar is onrustiger. fast 6, balanced 8, stable 12.",
@@ -156,11 +158,11 @@
         },
         "spot_id": {
           "name": "Spot-ID",
-          "description": "Neem deze bestaande locatie opnieuw op (ruimte en label blijven)."
+          "description": "Neem deze bestaande locatie opnieuw op (ruimte en label blijven). De metingen en het opgeslagen apparaat worden vervangen door de nieuwe opname."
         },
         "device": {
           "name": "Apparaat",
-          "description": "Bermuda-adres of naam van het apparaat. Standaard het enige gevolgde apparaat."
+          "description": "Bermuda-adres, naam of apparaat-ID. Standaard het enige gevolgde apparaat. Wordt bij de locatie opgeslagen."
         },
         "duration": {
           "name": "Duur",
@@ -172,7 +174,7 @@
         },
         "replace": {
           "name": "Vervangen",
-          "description": "Vervang een bestaande locatie met hetzelfde label in dezelfde ruimte."
+          "description": "Vervang een bestaande locatie met hetzelfde label in dezelfde ruimte (ongeacht welk apparaat die opnam). Uit: altijd een nieuwe locatie toevoegen."
         }
       }
     },
@@ -247,6 +249,10 @@
         "outlier_db": {
           "name": "Uitbijterafstand",
           "description": "Uitbijterdrempel in dB (0 = uit; standaard: ingesteld)."
+        },
+        "foreign_penalty": {
+          "name": "Straf voor spots van andere apparaten",
+          "description": "Straf in dB voor spots van andere apparaten (0 = uit; standaard: ingesteld)."
         },
         "details": {
           "name": "Details",

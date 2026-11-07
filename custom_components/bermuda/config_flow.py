@@ -29,6 +29,7 @@ from .const import (
     CONF_DEVTRACK_TIMEOUT,
     CONF_FINGERPRINT_MODE,
     CONF_FP_CONFIRM_CYCLES,
+    CONF_FP_FOREIGN_PENALTY,
     CONF_FP_LIVE_WINDOW,
     CONF_FP_METHOD,
     CONF_FP_MIN_CONFIDENCE,
@@ -49,6 +50,7 @@ from .const import (
     DEFAULT_ATTENUATION,
     DEFAULT_DEVTRACK_TIMEOUT,
     DEFAULT_FINGERPRINT_MODE,
+    DEFAULT_FP_FOREIGN_PENALTY,
     DEFAULT_FP_CONFIRM_CYCLES,
     DEFAULT_FP_LIVE_WINDOW,
     DEFAULT_FP_METHOD,
@@ -286,6 +288,10 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             vol.Required(
                 CONF_FP_OUTLIER_DB,
                 default=self.options.get(CONF_FP_OUTLIER_DB, DEFAULT_FP_OUTLIER_DB),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=40)),
+            vol.Required(
+                CONF_FP_FOREIGN_PENALTY,
+                default=self.options.get(CONF_FP_FOREIGN_PENALTY, DEFAULT_FP_FOREIGN_PENALTY),
             ): vol.All(vol.Coerce(float), vol.Range(min=0, max=40)),
             vol.Required(
                 CONF_FP_MIN_CONFIDENCE,

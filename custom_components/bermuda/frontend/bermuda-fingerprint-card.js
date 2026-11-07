@@ -6,7 +6,9 @@
  *   Plain web component, no build step. Served and auto-loaded by the integration.
  *
  * Options (all optional):
- *   device: sensor.<device>_fingerprint_room   (or any entity of a Bermuda device; auto when only one)
+ *   device: sensor.<device>_fingerprint_room   (or any entity of a Bermuda device). Fixes the device and hides
+ *           the device dropdown; without it the card lists every device with a fingerprint room sensor and
+ *           remembers the choice per browser (localStorage).
  *   duration: 60                                (recording seconds, 30-600)
  *   show_areas_without_spots: true
  *   exclude_areas: [area_id, ...]
@@ -14,10 +16,11 @@
  *   status_entity / spots_entity: override the global Bermuda sensors if renamed
  */
 
-const CARD_VERSION = "0.8.7-fp3";
+const CARD_VERSION = "0.8.7-fp7";
 const DEFAULT_STATUS = "sensor.bermuda_global_fingerprint_status";
 const DEFAULT_SPOTS = "sensor.bermuda_global_fingerprint_spots";
 const CONFIRM_MS = 4000;
+const STORAGE_KEY = "bermuda-fingerprint-card.device";
 
 const STRINGS = {
   en: {
@@ -44,12 +47,15 @@ const STRINGS = {
     warnings: "note: {w}",
     idle: "Stand still at a spot, then tap + spot for that area.",
     meta: "{samples} samples · {scanners} scanners · {date}",
-    rerecord: "Re-record",
+    rerecord: "Re-record with {device}",
     delete: "Delete",
     clear: "Delete all spots of {room}",
     sure: "Sure?",
-    hint: "Re-record: stand at the same place first.",
-    device: "Device (any Bermuda entity of the device)",
+    sure_replace: "Replace with {device}?",
+    hint: "Re-record replaces that spot's samples with a new recording by {device}; stand at the same place first. + spot adds a new spot and keeps the others.",
+    record_with: "Record with",
+    this_device: "this device",
+    device: "Fixed device (leave empty to choose in the card)",
     duration: "Recording duration (s)",
     show_empty: "Show areas without spots",
     error: "The fingerprint card hit an error: {e}",
@@ -78,12 +84,15 @@ const STRINGS = {
     warnings: "let op: {w}",
     idle: "Ga stil op een plek staan en tik bij die ruimte op + locatie.",
     meta: "{samples} metingen · {scanners} scanners · {date}",
-    rerecord: "Opnieuw opnemen",
+    rerecord: "Opnieuw opnemen met {device}",
     delete: "Verwijderen",
     clear: "Alle locaties van {room} verwijderen",
     sure: "Zeker?",
-    hint: "Opnieuw opnemen: ga eerst op dezelfde plek staan.",
-    device: "Apparaat (een Bermuda-entiteit van het apparaat)",
+    sure_replace: "Vervangen door {device}?",
+    hint: "Opnieuw opnemen vervangt de metingen van die locatie door een nieuwe opname met {device}; ga eerst op dezelfde plek staan. + locatie voegt een nieuwe locatie toe en laat de andere staan.",
+    record_with: "Opnemen met",
+    this_device: "dit apparaat",
+    device: "Vast apparaat (leeg laten om in de kaart te kiezen)",
     duration: "Opnameduur (s)",
     show_empty: "Ruimtes zonder locaties tonen",
     error: "De fingerprint-kaart liep tegen een fout aan: {e}",
@@ -105,8 +114,41 @@ function esc(v) {
   return String(v == null ? "" : v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
-/** Find the global and per-device Bermuda fingerprint entities. */
-function findEntities(hass, config) {
+function loadSelected() {
+  try {
+    return window.localStorage.getItem(STORAGE_KEY);
+  } catch (_e) {
+    return null;
+  }
+}
+
+function saveSelected(value) {
+  try {
+    if (value) window.localStorage.setItem(STORAGE_KEY, value);
+    else window.localStorage.removeItem(STORAGE_KEY);
+  } catch (_e) {
+    /* private mode or storage disabled: the choice lasts until the page reloads */
+  }
+}
+
+/** Unnamed iBeacon / IRK devices are called bermuda_<32 hex>_<major>_<minor>: keep the start only. */
+function shortName(name) {
+  const n = String(name == null ? "" : name);
+  const m = n.match(/^(bermuda_)?([0-9a-f]{8})[0-9a-f]{24}/i);
+  return m ? `${m[2]}…` : n;
+}
+
+/** Display name of a device: the device registry name, else the sensor's friendly name. */
+function deviceName(hass, deviceId, entityId) {
+  const d = deviceId && hass.devices && hass.devices[deviceId];
+  const n = d && (d.name_by_user || d.name);
+  if (n) return shortName(n);
+  const s = hass.states && hass.states[entityId];
+  return shortName((s && s.attributes && s.attributes.friendly_name) || entityId);
+}
+
+/** Find the global Bermuda fingerprint entities and the devices with a fingerprint room sensor. */
+function findEntities(hass, config, selected) {
   const ents = hass.entities || {};
   const states = hass.states || {};
   const bermuda = Object.keys(ents).filter((id) => ents[id].platform === "bermuda");
@@ -119,12 +161,22 @@ function findEntities(hass, config) {
   const spots = pick(config.spots_entity, DEFAULT_SPOTS, "_fingerprint_spots");
 
   const rooms = bermuda.filter((id) => id.startsWith("sensor.") && id.endsWith("_fingerprint_room"));
+  const seen = new Set();
+  const devices = [];
+  for (const id of rooms) {
+    const devId = ents[id].device_id || null;
+    if (devId && seen.has(devId)) continue;
+    if (devId) seen.add(devId);
+    devices.push({ entity: id, deviceId: devId, name: deviceName(hass, devId, id) });
+  }
+  devices.sort((a, b) => a.name.localeCompare(b.name));
   let room = null;
   if (config.device) {
     const dev = ents[config.device] && ents[config.device].device_id;
     room = rooms.find((id) => id === config.device) || rooms.find((id) => dev && ents[id].device_id === dev) || null;
-  } else if (rooms.length >= 1) {
-    room = rooms[0];
+  } else if (devices.length >= 1) {
+    const pick = selected && devices.find((d) => d.deviceId === selected || d.entity === selected);
+    room = pick ? pick.entity : rooms[0]; // default as before fp7: the first fingerprint room sensor
   }
   const deviceId = room && ents[room] ? ents[room].device_id : null;
   const area = deviceId
@@ -132,7 +184,16 @@ function findEntities(hass, config) {
     : null;
   // Only pass the device to the service when there is a choice to make.
   const sendDevice = config.device || rooms.length > 1 ? deviceId : null;
-  return { status, spots, room, area, deviceId: sendDevice };
+  return {
+    status,
+    spots,
+    room,
+    area,
+    deviceId: sendDevice,
+    selectedId: deviceId,
+    deviceName: room ? deviceName(hass, deviceId, room) : null,
+    devices: config.device ? [] : devices,
+  };
 }
 
 class BermudaFingerprintCard extends HTMLElement {
@@ -144,6 +205,8 @@ class BermudaFingerprintCard extends HTMLElement {
     this._confirm = null; // {key, until}
     this._registry = null; // {areas, floors}
     this._sig = null;
+    this._els = null;
+    this._selected = loadSelected(); // device registry id chosen in the dropdown
     this._config = { duration: 60, show_areas_without_spots: true, exclude_areas: [] };
   }
 
@@ -153,6 +216,18 @@ class BermudaFingerprintCard extends HTMLElement {
       this.shadowRoot.addEventListener("click", (ev) => {
         try {
           this._onClick(ev);
+        } catch (err) {
+          this._showError(err);
+        }
+      });
+      this.shadowRoot.addEventListener("change", (ev) => {
+        try {
+          const el = ev.composedPath().find((n) => n.dataset && n.dataset.select === "device");
+          if (!el) return;
+          this._selected = el.value || null;
+          saveSelected(this._selected);
+          this._sig = null;
+          this._render();
         } catch (err) {
           this._showError(err);
         }
@@ -330,10 +405,33 @@ class BermudaFingerprintCard extends HTMLElement {
     if (!hass || !this._config) return;
     const ents = (this._ents = findEntities(hass, this._config));
     const st = hass.states || {};
-    const sig = [st[ents.status], st[ents.spots], st[ents.room], st[ents.area], this._registry, hass.areas, hass.floors, lang(hass)];
+    const sig = [st[ents.status], st[ents.spots], st[ents.room], st[ents.area], this._registry, hass.areas, hass.floors,
+      hass.entities, hass.devices, ents.room, lang(hass)];
     if (this._sig && sig.every((v, i) => v === this._sig[i])) return;
     this._sig = sig;
-    this._root().innerHTML = `<style>${STYLE}</style><ha-card>${this._body(ents)}</ha-card>`;
+    const parts = this._body(ents);
+    const root = this._root();
+    if (!this._els || !root.contains(this._els.card)) {
+      root.innerHTML = `<style>${STYLE}</style><ha-card><div class="p-hdr"></div><div class="p-dev"></div><div class="p-main"></div></ha-card>`;
+      const q = (c) => root.querySelector(c);
+      this._els = { card: q("ha-card"), hdr: q(".p-hdr"), dev: q(".p-dev"), main: q(".p-main"), html: {} };
+    }
+    // Only replace the parts that changed, so an open device dropdown survives live sensor updates.
+    for (const k of ["hdr", "dev", "main"]) {
+      if (this._els.html[k] !== parts[k]) {
+        this._els[k].innerHTML = parts[k];
+        this._els.html[k] = parts[k];
+      }
+    }
+  }
+
+  _devicePicker(ents) {
+    if (!ents.devices || ents.devices.length < 2) return "";
+    const opts = ents.devices
+      .map((d) => `<option value="${esc(d.deviceId || d.entity)}"${d.entity === ents.room ? " selected" : ""}>${esc(d.name)}</option>`)
+      .join("");
+    return `<label class="devsel"><ha-icon icon="mdi:cellphone-marker"></ha-icon><span>${esc(t(this._hass, "record_with"))}</span>
+      <select data-select="device">${opts}</select></label>`;
   }
 
   _body(ents) {
@@ -344,8 +442,11 @@ class BermudaFingerprintCard extends HTMLElement {
     const statusState = states[ents.status];
     const title = esc(cfg.title || t(hass, "title"));
     if (!spotsState || !statusState || spotsState.state === "unavailable") {
-      return `<div class="hdr"><ha-icon icon="mdi:fingerprint"></ha-icon><span>${title}</span></div>
-        <div class="msg warn">${esc(t(hass, "unavailable"))}</div>`;
+      return {
+        hdr: `<div class="hdr"><ha-icon icon="mdi:fingerprint"></ha-icon><span>${title}</span></div>`,
+        dev: "",
+        main: `<div class="msg warn">${esc(t(hass, "unavailable"))}</div>`,
+      };
     }
     const spotAreas = (spotsState.attributes && spotsState.attributes.areas) || {};
     const reg = this._getRegistry();
@@ -362,9 +463,9 @@ class BermudaFingerprintCard extends HTMLElement {
     const total = counted.reduce((n, a) => n + a.info.count, 0);
     const withSpots = counted.filter((a) => a.info.count > 0).length;
 
-    let html = `<div class="hdr"><ha-icon icon="mdi:fingerprint"></ha-icon><span>${title}</span>
+    const hdr = `<div class="hdr"><ha-icon icon="mdi:fingerprint"></ha-icon><span>${title}</span>
       <span class="sum">${esc(t(hass, "summary", { spots: total, rooms: withSpots, areas: counted.length }))}</span></div>`;
-    html += this._live(ents);
+    let html = this._live(ents);
     html += this._status(statusState);
 
     const floors = (reg.floors || [])
@@ -383,9 +484,9 @@ class BermudaFingerprintCard extends HTMLElement {
         .sort((a, b) => a.name.localeCompare(b.name));
       if (!list.length) continue;
       html += `<div class="floor">${g.icon ? `<ha-icon icon="${esc(g.icon)}"></ha-icon>` : ""}${esc(g.name)}</div>`;
-      for (const a of list) html += this._area(a, recArea === a.area_id);
+      for (const a of list) html += this._area(a, recArea === a.area_id, ents);
     }
-    return html;
+    return { hdr, dev: this._devicePicker(ents), main: html };
   }
 
   _live(ents) {
@@ -408,10 +509,11 @@ class BermudaFingerprintCard extends HTMLElement {
     const hass = this._hass;
     const a = s.attributes || {};
     const vars = { room: esc(a.room_name || ""), label: esc(a.label || ""), samples: a.samples || 0, scanners: a.scanners_heard || 0 };
+    const by = a.device_name ? ` · ${esc(shortName(a.device_name))}` : "";
     if (s.state === "recording") {
       return `<div class="rec">
         <div class="rt"><ha-icon class="blink" icon="mdi:record-circle"></ha-icon>
-          <span>${t(hass, "recording", vars)}</span>
+          <span>${t(hass, "recording", vars)}${by}</span>
           <button class="btn stop" data-action="stop">${esc(t(hass, "stop"))}</button></div>
         <div class="bar"><div style="width:${Number(a.progress) || 0}%"></div></div>
         <div class="s">${esc(t(hass, "left", { ...vars, s: a.seconds_left ?? "" }))}</div></div>`;
@@ -420,13 +522,14 @@ class BermudaFingerprintCard extends HTMLElement {
       const warn = Array.isArray(a.warnings) ? a.warnings.join(", ") : a.warnings ? String(a.warnings) : "";
       const w = warn ? ` (${esc(t(hass, "warnings", { w: warn }))})` : "";
       const cls = s.state === "done" ? "ok" : "warn";
-      return `<div class="msg ${cls}">${t(hass, s.state, vars)}${w}</div>`;
+      return `<div class="msg ${cls}">${t(hass, s.state, vars)}${by}${w}</div>`;
     }
     return `<div class="msg">${esc(t(hass, "idle"))}</div>`;
   }
 
-  _area(a, recording) {
+  _area(a, recording, ents) {
     const hass = this._hass;
+    const devVars = { device: esc((ents && ents.deviceName) || t(hass, "this_device")) };
     const n = a.info.count;
     const cls = n >= 5 ? "good" : n > 0 ? "some" : "none";
     const label = n === 0 ? t(hass, "no_spots") : n === 1 ? t(hass, "one_spot") : t(hass, "n_spots", { n });
@@ -446,18 +549,20 @@ class BermudaFingerprintCard extends HTMLElement {
         const date = String(s.updated || s.created || "").slice(5, 16).replace("T", " ");
         const reKey = this._confirm && this._confirm.key === `re:${s.id}`;
         const delKey = this._confirm && this._confirm.key === `del:${s.id}`;
+        const mine = ents && s.device_id && s.device_id === ents.selectedId;
+        const by = s.device ? `<span class="chip dev ${mine ? "mine" : ""}">${esc(shortName(s.device))}</span> ` : "";
         html += `<div class="spot"><ha-icon icon="mdi:map-marker"></ha-icon>
           <div class="an"><div class="v">${esc(s.label)}</div>
-            <div class="s">${esc(t(hass, "meta", { samples: s.samples, scanners: s.scanners, date }))}</div></div>
-          <button class="ib ${reKey ? "confirm" : ""}" title="${esc(t(hass, "rerecord"))}" data-action="rerecord"
-            data-spot="${esc(s.id)}" data-duration="${esc(s.duration_s || "")}">${reKey ? esc(t(hass, "sure")) : '<ha-icon icon="mdi:refresh"></ha-icon>'}</button>
+            <div class="s">${by}${esc(t(hass, "meta", { samples: s.samples, scanners: s.scanners, date }))}</div></div>
+          <button class="ib ${reKey ? "confirm" : ""}" title="${t(hass, "rerecord", devVars)}" data-action="rerecord"
+            data-spot="${esc(s.id)}" data-duration="${esc(s.duration_s || "")}">${reKey ? t(hass, "sure_replace", devVars) : '<ha-icon icon="mdi:refresh"></ha-icon>'}</button>
           <button class="ib del ${delKey ? "confirm" : ""}" title="${esc(t(hass, "delete"))}" data-action="delete"
             data-spot="${esc(s.id)}">${delKey ? esc(t(hass, "sure")) : '<ha-icon icon="mdi:delete"></ha-icon>'}</button></div>`;
       }
       html += `<button class="btn wide" data-action="record" data-area="${id}">${esc(t(hass, "add_long", { s: this._config.duration }))}</button>`;
       if (n > 0) {
         const clr = this._confirm && this._confirm.key === `clr:${a.area_id}`;
-        html += `<div class="s hint">${esc(t(hass, "hint"))}</div>
+        html += `<div class="s hint">${t(hass, "hint", devVars)}</div>
           <button class="btn wide danger ${clr ? "confirm" : ""}" data-action="clear" data-area="${id}">
           ${clr ? esc(t(hass, "sure")) : esc(t(hass, "clear", { room: a.name }))}</button>`;
       }
@@ -516,6 +621,13 @@ const STYLE = `
   .ib.del { color: var(--error-color, #db4437); }
   .ib.confirm { border-radius: 20px; width: auto; padding: 0 10px; }
   .hint { margin-top: 6px; }
+  .devsel { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; font-size: 0.9em; color: var(--secondary-text-color); }
+  .devsel ha-icon { --mdc-icon-size: 20px; }
+  .devsel select { flex: 1; min-width: 0; font: inherit; font-size: 1.05em; color: var(--primary-text-color);
+    background: var(--secondary-background-color); border: 1px solid var(--divider-color); border-radius: 12px;
+    padding: 6px 10px; min-height: 36px; cursor: pointer; }
+  .chip.dev { background: var(--secondary-background-color); border: 1px solid var(--divider-color); font-size: 0.9em; }
+  .chip.dev.mine { border-color: var(--primary-color); color: var(--primary-color); }
 `;
 
 class BermudaFingerprintCardEditor extends HTMLElement {

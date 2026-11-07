@@ -116,7 +116,7 @@ def smoothed_accuracy(
         sm = fc.RoomSmoother(**(smoother_kwargs or {}))
         t = 0.0
         for vec in fc.spot_windows(spot):
-            res = matcher.match(vec)
+            res = matcher.match(vec, device=fc.spot_device(spot))
             base = fc.nearest_proxy_room(vec, scanner_room, offsets)
             end = t + window_s
             while t < end:
@@ -174,7 +174,7 @@ def stress(spots: list[dict], pair: tuple[str, str], **matcher_kwargs) -> dict[s
             j = 0 if spot["room"] == pair[0] else 2
             other = pair[1] if j == 0 else pair[0]
             for vec in fc.spot_windows(spot):
-                res = matcher.match(_perturb(vec, kind, rng))
+                res = matcher.match(_perturb(vec, kind, rng), device=fc.spot_device(spot))
                 pred = max(res.posterior, key=res.posterior.get) if res else None
                 counts[j] += pred == other
                 counts[j + 1] += 1
@@ -580,6 +580,9 @@ def main() -> int:
     ap.add_argument("--exclude", action="append", default=[], help="leave out spots (id, or room/label)")
     ap.add_argument("--min-confidence", type=float, default=0.5, help="fallback threshold (effective / smoothed)")
     ap.add_argument("--outlier-db", type=float, help="override outlier_db for all variants")
+    ap.add_argument(
+        "--foreign-penalty", type=float, help="override foreign_penalty (dB, spots of other devices) for all variants"
+    )
     ap.add_argument("--stress", action="store_true", help="also run live-like perturbation tests")
     ap.add_argument("--no-smooth", action="store_true", help="skip the (slower) smoothed evaluation")
     ap.add_argument(
@@ -630,6 +633,8 @@ def main() -> int:
             continue
         if args.outlier_db is not None:
             kwargs = {**kwargs, "outlier_db": args.outlier_db}
+        if args.foreign_penalty is not None:
+            kwargs = {**kwargs, "foreign_penalty": args.foreign_penalty}
         res = fc.evaluate(
             spots, scanner_room=scanner_room, rssi_offsets=offsets, min_confidence=args.min_confidence, **kwargs
         )

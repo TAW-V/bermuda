@@ -38,6 +38,7 @@ from homeassistant.util.dt import now as dt_now
 from .const import (
     _LOGGER,
     CONF_FINGERPRINT_MODE,
+    CONF_FP_FOREIGN_PENALTY,
     CONF_FP_METHOD,
     CONF_FP_MIN_CONFIDENCE,
     CONF_FP_OFFSET_MAX,
@@ -45,12 +46,14 @@ from .const import (
     CONF_FP_PRESET,
     CONF_RSSI_OFFSETS,
     DEFAULT_FINGERPRINT_MODE,
+    DEFAULT_FP_FOREIGN_PENALTY,
     DEFAULT_FP_METHOD,
     DEFAULT_FP_MIN_CONFIDENCE,
     DEFAULT_FP_OFFSET_MAX,
     DEFAULT_FP_OUTLIER_DB,
     DEFAULT_FP_PRESET,
     DOMAIN,
+    DOMAIN_PRIVATE_BLE_DEVICE,
     FINGERPRINT_MODE_OFF,
     FINGERPRINT_MODE_OVERRIDE,
     FP_SWITCHING_KEYS,
@@ -143,6 +146,7 @@ class FingerprintState:
 @dataclass
 class RecordingSession:
     device_address: str
+    device_ref: dict[str, Any]  # {"device_id", "name"} at the start, kept with the spot
     room: str
     label: str
     spot_id: str | None  # existing spot to replace, if any
@@ -166,6 +170,7 @@ class FingerprintManager:
             "method": method if method in METHODS else DEFAULT_FP_METHOD,
             "offset_max": float(opts.get(CONF_FP_OFFSET_MAX, DEFAULT_FP_OFFSET_MAX)),
             "outlier_db": float(opts.get(CONF_FP_OUTLIER_DB, DEFAULT_FP_OUTLIER_DB)),
+            "foreign_penalty": float(opts.get(CONF_FP_FOREIGN_PENALTY, DEFAULT_FP_FOREIGN_PENALTY)),
         }
         self.min_confidence = float(opts.get(CONF_FP_MIN_CONFIDENCE, DEFAULT_FP_MIN_CONFIDENCE))
         # Room switching speed: a preset, or custom values from the options.
@@ -313,11 +318,28 @@ class FingerprintManager:
                 return spot
         raise ServiceValidationError(f"Unknown spot_id '{spot_id}'")
 
+    def _device_ref(self, address: str | None, stored: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Device registry id and display name of a tracked device (live when known, else as stored)."""
+        stored = stored or {}
+        ref = {"device_id": stored.get("device_id"), "name": stored.get("name")}
+        dev = self.coordinator.devices.get(address) if address else None
+        if dev is not None:
+            ref["name"] = dev.name_by_user or dev.name
+            uid = dev.unique_id or dev.address
+            entry = self.coordinator.dr.async_get_device(
+                identifiers={(DOMAIN, uid), (DOMAIN_PRIVATE_BLE_DEVICE, uid)}
+            )
+            if entry is not None:
+                ref = {"device_id": entry.id, "name": entry.name_by_user or entry.name or ref["name"]}
+        return ref
+
     def _scanner_name(self, address: str) -> str:
         dev = self.coordinator.devices.get(address)
         return dev.name if dev is not None else address
 
     def spot_summary(self, spot: dict[str, Any]) -> dict[str, Any]:
+        recorded_with = spot.get("recorded_with") or {}
+        ref = self._device_ref(recorded_with.get("device"), recorded_with)
         return {
             "id": spot["id"],
             "room": spot["room"],
@@ -329,6 +351,8 @@ class FingerprintManager:
             "raw_samples": spot.get("raw", {}).get("samples"),
             "created": spot.get("created"),
             "updated": spot.get("updated"),
+            "device": ref["name"],
+            "device_id": ref["device_id"],
         }
 
     def areas_overview(self) -> dict[str, dict[str, Any]]:
@@ -394,6 +418,7 @@ class FingerprintManager:
                     vol.Optional("method"): vol.In(METHODS),
                     vol.Optional("offset_max"): vol.All(vol.Coerce(float), vol.Range(min=0, max=10)),
                     vol.Optional("outlier_db"): vol.All(vol.Coerce(float), vol.Range(min=0, max=40)),
+                    vol.Optional("foreign_penalty"): vol.All(vol.Coerce(float), vol.Range(min=0, max=40)),
                     vol.Optional("use_offset"): cv.boolean,
                     vol.Optional("temperature"): vol.All(vol.Coerce(float), vol.Range(min=0.05, max=20)),
                     vol.Optional("details", default=False): cv.boolean,
@@ -439,6 +464,7 @@ class FingerprintManager:
                 )
         session = RecordingSession(
             device_address=device.address,
+            device_ref=self._device_ref(device.address),
             room=room,
             label=label,
             spot_id=replace_id,
@@ -516,7 +542,7 @@ class FingerprintManager:
         offsets = dict(self.coordinator.options.get(CONF_RSSI_OFFSETS, {}))
         # Defaults: the configured matcher; service fields override for experiments.
         kwargs = dict(self.matcher_kwargs)
-        for key in ("method", "offset_max", "outlier_db", "temperature"):
+        for key in ("method", "offset_max", "outlier_db", "foreign_penalty", "temperature"):
             if key in call.data:
                 kwargs[key] = call.data[key]
         if call.data.get("use_offset") is False:
@@ -597,6 +623,8 @@ class FingerprintManager:
             "label": rec.label,
             "spot_id": rec.spot_id,
             "device": rec.device_address,
+            "device_name": rec.device_ref.get("name"),
+            "device_id": rec.device_ref.get("device_id"),
             "duration": int(rec.recorder.duration),
             "seconds_left": left,
             "progress": round(100 * (1 - left / rec.recorder.duration)),
@@ -637,6 +665,7 @@ class FingerprintManager:
                     "area_id": self.room_area_id(rec.room),
                     "label": rec.label,
                     "device": rec.device_address,
+                    "device_name": rec.device_ref.get("name"),
                     "carry": rec.carry,
                     "started": rec.started,
                 }
@@ -648,7 +677,12 @@ class FingerprintManager:
                 "room": rec.room,
                 "created": stamp,
                 "updated": stamp,
-                "recorded_with": {"device": rec.device_address, "carry": rec.carry},
+                "recorded_with": {
+                    "device": rec.device_address,
+                    "device_id": rec.device_ref.get("device_id"),
+                    "name": rec.device_ref.get("name"),
+                    "carry": rec.carry,
+                },
                 **built,
                 "raw": {"file": raw_name, "samples": raw_doc["samples"]},
             }
@@ -678,6 +712,8 @@ class FingerprintManager:
             "label": rec.label,
             "spot_id": spot_id,
             "device": rec.device_address,
+            "device_name": rec.device_ref.get("name"),
+            "device_id": rec.device_ref.get("device_id"),
             "duration": int(rec.recorder.duration),
             "seconds_left": 0,
             "progress": 100 if state == "done" else 0,
@@ -722,7 +758,7 @@ class FingerprintManager:
         else:
             if nowstamp - device.last_seen <= DEVICE_UNSEEN_S:
                 live = live_vector(self._live_readings(device, nowstamp), nowstamp, self.live_window)
-                match = self.matcher.match(live, active)
+                match = self.matcher.match(live, active, device=device.address)
                 detail["heard_scanners"] = len(live)
             if match is None:
                 smoothed = smoother.update(None, nowstamp)
