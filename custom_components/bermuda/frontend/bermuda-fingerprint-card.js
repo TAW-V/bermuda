@@ -16,7 +16,7 @@
  *   status_entity / spots_entity: override the global Bermuda sensors if renamed
  */
 
-const CARD_VERSION = "0.8.7-fp7";
+const CARD_VERSION = "0.8.7-fp7.1";
 const DEFAULT_STATUS = "sensor.bermuda_global_fingerprint_status";
 const DEFAULT_SPOTS = "sensor.bermuda_global_fingerprint_spots";
 const CONFIRM_MS = 4000;
@@ -403,7 +403,7 @@ class BermudaFingerprintCard extends HTMLElement {
   _render() {
     const hass = this._hass;
     if (!hass || !this._config) return;
-    const ents = (this._ents = findEntities(hass, this._config));
+    const ents = (this._ents = findEntities(hass, this._config, this._selected));
     const st = hass.states || {};
     const sig = [st[ents.status], st[ents.spots], st[ents.room], st[ents.area], this._registry, hass.areas, hass.floors,
       hass.entities, hass.devices, ents.room, lang(hass)];
